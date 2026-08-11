@@ -1,0 +1,123 @@
+{
+  "version": "0.30 Web",
+  "base": "0.29 Web",
+  "target": "iPhone / Safari / PWA",
+  "publication": "GitHub repository + Render Blueprint",
+  "features": {
+    "schedule": true,
+    "rating": true,
+    "personal_tasks": true,
+    "sdo": true,
+    "encrypted_http_only_session": true,
+    "iphone_safe_area": true,
+    "pwa_install": true,
+    "background_push": false
+  },
+  "validation": {
+    "node_check_app_js": true,
+    "node_check_server_js": true,
+    "node_check_sw_js": true,
+    "local_api_health_smoke_test": true,
+    "manifest_json_valid": true,
+    "secret_scan_no_hardcoded_credentials_found": true,
+    "real_portal_tested": false,
+    "real_sdo_credentials_tested": false
+  },
+  "files": [
+    {
+      "name": ".gitignore",
+      "bytes": 42,
+      "sha256": "fbf16f13403c0b6c4013fcb45ff8db7346f8791371a0ce1ca14f676ddef0d387"
+    },
+    {
+      "name": "00_GITHUB_START_RU.txt",
+      "bytes": 797,
+      "sha256": "ad345e815754beeed1181731a04995ee07a39a45e6738884dad686861b7fd0f9"
+    },
+    {
+      "name": "CHANGELOG_RU.txt",
+      "bytes": 1483,
+      "sha256": "1d3cf3953e018367383a43df2e56ef06ac61a4b587f46c0d1a42cdc01edf2841"
+    },
+    {
+      "name": "INSTALL_IPHONE_RU.txt",
+      "bytes": 6334,
+      "sha256": "a235693883db8d8fbb7e0aba854de780c917c4af79399484b4ba54f568e289fb"
+    },
+    {
+      "name": "README.md",
+      "bytes": 1313,
+      "sha256": "5cc62da97c3e7eaa85c8272166aaa946d2425906bea77410914e9066291781a4"
+    },
+    {
+      "name": "README_RU.txt",
+      "bytes": 2991,
+      "sha256": "1f84a0e201abd8ecd5dc96868201dcf5928649ddb11d7f74e03f29b435814586"
+    },
+    {
+      "name": "SECURITY_SDO_RU.txt",
+      "bytes": 1055,
+      "sha256": "6723a037c6b47f7326e5a4159ad98f75ef2e33a71db71867a11a9ee9f4e1c935"
+    },
+    {
+      "name": "app.js",
+      "bytes": 145578,
+      "sha256": "8b239a2eb569d0c7d7c1f15a0f612c72b242cc816f18a051b48ac55eeb6a413f"
+    },
+    {
+      "name": "badge-96.png",
+      "bytes": 3068,
+      "sha256": "135a25b7db601c0434f97cff5c3d14449fcbd47e2d52fe7cfedad0dc065d1783"
+    },
+    {
+      "name": "icon-180.png",
+      "bytes": 8607,
+      "sha256": "60331ecc70d314f70312cc0c6dfc0cee610136bf57a9ea8cecb5071be367c0f9"
+    },
+    {
+      "name": "icon-192.png",
+      "bytes": 8682,
+      "sha256": "b9358df07e5e9e27323323d612c7ff193f9e329d3eb23a001d1fbce07b6c66c8"
+    },
+    {
+      "name": "icon-512.png",
+      "bytes": 33642,
+      "sha256": "1b60637ed2f6b354e28fefb6b06ccc837eeb938ad997ec7cd9c234ce3a87a4ea"
+    },
+    {
+      "name": "icon-maskable-512.png",
+      "bytes": 23434,
+      "sha256": "b4e8a51f7cdbc1cb6e1421c94fe0f50d101cb9292c5245e01c22ece62c568a89"
+    },
+    {
+      "name": "index.html",
+      "bytes": 2444,
+      "sha256": "7dbee6291d6f97bc5ac1a8bb7ad120535c8d23923390a41b9ff53e53e60d3f5f"
+    },
+    {
+      "name": "manifest.webmanifest",
+      "bytes": 867,
+      "sha256": "396cb7485753a9ef2cae305a9c1e1950c136bb6b7db9bc87abc7bf39821878e5"
+    },
+    {
+      "name": "package.json",
+      "bytes": 315,
+      "sha256": "50e8bcac10c59068cc5f697b939397ef34f6b2a26a0696779a00aa71d17b6cab"
+    },
+    {
+      "name": "render.yaml",
+      "bytes": 311,
+      "sha256": "87d55bd6f5ef1d38a15b8069ab570e63e839e679b963323baf28842c04936da3"
+    },
+    {
+      "name": "server.js",
+      "bytes": 18997,
+      "sha256": "31ab4f64d870ef190eb41857ed2f6cba555cdf2a13f156e64e0227e2281d5521"
+    },
+    {
+      "name": "sw.js",
+      "bytes": 1871,
+      "sha256": "caae822b0540828b871fb2f024bcc7d0444ab82bd9189aea85f8f93e93423f16"
+    }
+  ]
+}
