@@ -1,0 +1,12 @@
+{
+  "name": "mguu-web",
+  "version": "0.31.0",
+  "private": true,
+  "description": "Веб-приложение МГУУ v0.31 для iPhone/Safari: исправлен запуск с GitHub Pages и PWA-пути; полный backend работает через Render",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20 <25"
+  }
+}
