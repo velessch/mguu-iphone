@@ -1,9 +1,0 @@
-{
-  "name": "mguu-web-iphone",
-  "version": "0.32.0",
-  "private": true,
-  "description": "МГУУ Web v0.32 для iPhone/Safari, подготовлено для Vercel Functions",
-  "engines": {
-    "node": ">=20 <25"
-  }
-}
