@@ -1,8 +1,0 @@
-БЕЗОПАСНОСТЬ СДО — MGUU Web v0.32 / Vercel
-
-- Пароль СДО не записывается в localStorage, файлы или GitHub.
-- Vercel Function передаёт логин/пароль официальному online.mguu.ru только для получения Moodle-токена.
-- Токен шифруется AES-256-GCM.
-- Зашифрованная сессия хранится в HttpOnly; Secure; SameSite=Lax cookie.
-- Ключ MGUU_SESSION_SECRET задаётся только в Vercel → Project Settings → Environment Variables.
-- Не добавляйте .env, токены, пароли или ключи в публичный репозиторий.
