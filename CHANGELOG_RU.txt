@@ -1,0 +1,9 @@
+МГУУ Web v0.32 — iPhone / Vercel
+
+- backend перенесён с постоянного Node.js server.js на Vercel Node.js Function;
+- добавлен vercel.json с маршрутами /api/* и /portal/*;
+- сохранены расписание, рейтинг и СДО;
+- MGUU_SESSION_SECRET теперь задаётся через Vercel Environment Variables;
+- обновлён PWA/service-worker cache до v0.32;
+- обновлены версия, инструкции и диагностика /api/health;
+- Render-конфигурация удалена из Vercel-сборки.
