@@ -1,4 +1,4 @@
-const CACHE='mguu-web-v032-vercel';
+const CACHE='mguu-web-v034-vercel';
 const BASE=new URL('./',self.location.href);
 const asset=p=>new URL(p,BASE).href;
 const SHELL=['./','./index.html','./app.js','./manifest.webmanifest','./emblem.png','./icon-180.png','./icon-192.png','./icon-512.png','./icon-maskable-512.png','./badge-96.png'].map(asset);

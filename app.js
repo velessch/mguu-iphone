@@ -1,9 +1,9 @@
 (function(){
 'use strict';
-if(window.__mguuWebV032){return;}
-window.__mguuWebV032=true;
+if(window.__mguuWebV034){return;}
+window.__mguuWebV034=true;
 
-const APP_VERSION='0.32 Web · Vercel';
+const APP_VERSION='0.34 Web · Vercel';
 const DEFAULT_GROUP={id:'000000230',name:'24ГМУ-СКР11.1'};
 const APP_ROOT=new URL('./',window.location.href);
 const IS_GITHUB_PAGES=/\.github\.io$/i.test(window.location.hostname);
@@ -37,6 +37,11 @@ const K_RATING_GROUPS='olesya_v014_rating_groups';
 const K_RATING_BOOK_BASE='olesya_v014_rating_book';
 const K_RATING_BOOKS_BASE='olesya_v014_rating_books';
 const K_RATING_CACHE_BASE='olesya_v014_rating_cache';
+const K_RATING_PERIOD_BASE='olesya_v034_rating_period';
+const K_RATING_BG_LAST='mguu_v046_rating_bg_last';
+const K_RATING_DETAIL_CACHE_BASE='mguu_v047_rating_detail';
+const K_RATING_CACHE_REPAIR_V048='mguu_v048_rating_cache_repaired';
+const RATING_BACKGROUND_INTERVAL=2*60*1000;
 const K_NOTIFICATIONS='mguu_v017_notifications';
 const K_NOTIFY_SCHEDULE_SCOPE='mguu_v021_notify_schedule_scope';
 const K_NOTIFY_RATING_SCOPE='mguu_v021_notify_rating_scope';
@@ -62,6 +67,13 @@ let selectedBook=null;
 let ratingBooks=[];
 let ratingData=null;
 let ratingBusy=false;
+let ratingPeriod={year:'',yearLabel:'',semester:'',semesterLabel:''};
+let ratingPeriodOptions={years:[],semesters:[]};
+let ratingPeriodCatalog=[];
+let ratingBackgroundBusy=false;
+let ratingLastBackgroundAt=Number(localStorage.getItem(K_RATING_BG_LAST)||0)||0;
+let ratingBackgroundTimer=null;
+let ratingLoadSeq=0;
 let pendingRatingSubjects=[];
 let pendingRatingMarks=[];
 let pendingScheduleMarks=[];
@@ -206,13 +218,15 @@ function openScheduleNotification(n){
 function openRatingNotification(n){
   if(n&&n.groupId){ratingGroup={id:String(n.groupId),name:n.groupName||ratingGroup.name};writeJson(K_RATING_SELECTED_GROUP,ratingGroup);}
   if(n&&n.bookUrl){selectedBook={label:n.book||'Зачётная книжка',url:n.bookUrl};writeJson(ratingBookKey(),selectedBook);}else{selectedBook=readJson(ratingBookKey(),selectedBook);}
+  ratingPeriod=selectedBook?loadStoredRatingPeriod(selectedBook):normalizeRatingPeriod({});
   pendingRatingSubjects=[];pendingRatingMarks=[];
   if(n&&n.extra){
+    if(n.extra.ratingPeriod&&selectedBook){ratingPeriod=normalizeRatingPeriod(n.extra.ratingPeriod);writeJson(ratingPeriodKey(selectedBook),ratingPeriod);}
     if(Array.isArray(n.extra.subjects))pendingRatingSubjects=n.extra.subjects.slice();else if(n.extra.subject)pendingRatingSubjects=[n.extra.subject];
     if(Array.isArray(n.extra.scoreChanges))pendingRatingMarks=n.extra.scoreChanges.map(function(x){return {subject:x.subject||n.extra.subject||'',label:x.label||'',oldValue:x.oldValue||'',newValue:x.newValue||'',kind:x.kind||'',isTotal:!!x.isTotal};});
   }
   section='rating';localStorage.setItem(K_SECTION,section);closeNotificationsPanel();applySection();updateBookButton();
-  let cache=selectedBook?readJson(ratingCacheKey(selectedBook),null):null;if(cache){ratingData=cache;renderRating();}
+  let cache=selectedBook?readJson(ratingCacheKey(selectedBook,ratingPeriod),null):null;if(cache){ratingData=cache;ratingPeriodOptions=sanitizeRatingPeriodOptions(cache.periodOptions||{years:[],semesters:[]});renderRating();}
   else{ratingData=null;renderRating();}
   loadRatingBooks();
 }
@@ -241,7 +255,7 @@ function addScheduleChangeNotifications(changes){
     addAppNotification('schedule',title,body,{date:date,count:items.length,changes:items.map(function(ch){let e=ch.now||ch.old||{};return {kind:ch.kind,date:e.date||date,pair:e.pair||'',subject:e.subject||''};})});
   });
 }
-function ratingSubjectsSignature(data){return ratingSubjectsFromTables((data&&data.tables)||[]).map(x=>({subject:x.subject,total:x.total,details:x.details}));}
+function ratingSubjectsSignature(data){return ratingSubjectsResolved(data).map(x=>({subject:x.subject,total:x.total,details:x.details}));}
 function ratingScoreChanges(oldData,newData){
   let oldItems=ratingSubjectsSignature(oldData),newItems=ratingSubjectsSignature(newData);if(!oldItems.length||!newItems.length)return [];
   let oldMap=new Map(oldItems.map(x=>[normalizeSubject(x.subject),x])),changes=[];
@@ -251,7 +265,9 @@ function ratingScoreChanges(oldData,newData){
     (item.details||[]).forEach(function(d){
       let key=normalizeSubject(d.label),before=oldDetails.has(key)?oldDetails.get(key):'',after=String(d.value||'');
       if(before===after)return;
-      changes.push({subject:item.subject,label:d.label,oldValue:before,newValue:after,kind:before?'changed':'added',isTotal:/(итог|общий|сумм|всего|рейтинг)/i.test(d.label)});
+      let looksGrade=/(кт\s*\d*|контрольн[а-яё]*\s+точк|балл|оценк|итог|общий|сумм|всего|рейтинг|экзамен|зач[её]т|результат)/i.test(d.label)||isScoreValue(after)||isScoreValue(before);
+      if(!looksGrade)return;
+      changes.push({subject:item.subject,label:d.label,oldValue:before,newValue:after,kind:before?'changed':'added',isTotal:/(итог|общий|сумм|всего|рейтинг|результат)/i.test(d.label)});
     });
   });
   return changes;
@@ -262,7 +278,7 @@ function addRatingChangeNotifications(changes,data){
     items.sort(function(a,b){return Number(a.isTotal)-Number(b.isTotal);});let first=items[0],isNew=!first.oldValue||/^[-–—]$/.test(first.oldValue),title=isNew?'Новая оценка':'Изменилась оценка';
     let scoreText=isNew?(first.label+': '+first.newValue):(first.label+': '+first.oldValue+' → '+first.newValue);
     let body=subject+' · '+scoreText+(items.length>1?' · ещё изменений: '+(items.length-1):'')+'.';
-    addAppNotification('rating',title,body,{subject:subject,subjects:[subject],scoreChanges:items,bookUrl:selectedBook&&selectedBook.url?selectedBook.url:''});
+    addAppNotification('rating',title,body,{subject:subject,subjects:[subject],scoreChanges:items,bookUrl:selectedBook&&selectedBook.url?selectedBook.url:'',ratingPeriod:normalizeRatingPeriod(ratingPeriod)});
   });
 }
 
@@ -366,7 +382,7 @@ function naturalGroupSort(a,b){let ay=(/^\d{2}/.exec(a.name)||['00'])[0],by=(/^\
 function groupLabel(){return selectedGroup.name||DEFAULT_GROUP.name;}
 function ratingGroupLabel(){return ratingGroup.name||groupLabel();}
 function scheduleNotificationScope(group){let g=group||selectedGroup;return String(g&&g.id||'');}
-function ratingNotificationScope(book){return String(ratingGroup&&ratingGroup.id||'')+'|'+String(book&&book.url||'');}
+function ratingNotificationScope(book){let p=ratingPeriod||{};return String(ratingGroup&&ratingGroup.id||'')+'|'+String(book&&book.url||'')+'|'+String(p.year||'')+'|'+String(p.semester||'');}
 function hash(s){let h=0;for(let i=0;i<s.length;i++)h=((h<<5)-h+s.charCodeAt(i))|0;return Math.abs(h);}
 function cardColor(subject){return colors[subject]||pastel[hash(subject)%pastel.length];}
 function textColor(hex){let h=(hex||'').replace('#','');if(h.length!==6)return '#1f2937';let r=parseInt(h.slice(0,2),16),g=parseInt(h.slice(2,4),16),b=parseInt(h.slice(4,6),16);return (0.299*r+0.587*g+0.114*b)>155?'#172033':'#ffffff';}
@@ -470,7 +486,18 @@ async function fetchGroups(){
 
 function ratingBookKey(){return K_RATING_BOOK_BASE+'_'+ratingGroup.id;}
 function ratingBooksKey(){return K_RATING_BOOKS_BASE+'_'+ratingGroup.id;}
-function ratingCacheKey(book){return K_RATING_CACHE_BASE+'_'+ratingGroup.id+'_'+hash((book&&book.url)||'none');}
+function ratingPeriodKey(book){return K_RATING_PERIOD_BASE+'_'+ratingGroup.id+'_'+hash((book&&book.url)||'none');}
+function normalizeRatingPeriod(p){p=p&&typeof p==='object'?p:{};return {year:String(p.year||''),yearLabel:String(p.yearLabel||p.year||''),semester:String(p.semester||''),semesterLabel:String(p.semesterLabel||p.semester||'')};}
+function loadStoredRatingPeriod(book){return sanitizeRatingPeriod(normalizeRatingPeriod(readJson(ratingPeriodKey(book),{})));}
+function saveRatingPeriod(){if(selectedBook){ratingPeriod=sanitizeRatingPeriod(ratingPeriod);writeJson(ratingPeriodKey(selectedBook),ratingPeriod);}}
+function ratingCacheKey(book,period){let p=normalizeRatingPeriod(period||ratingPeriod);return K_RATING_CACHE_BASE+'_'+ratingGroup.id+'_'+hash(String(book&&book.url||'none')+'|'+p.year+'|'+p.semester);}
+function ratingDetailCacheKey(url){return K_RATING_DETAIL_CACHE_BASE+'_'+hash(String(url||''));}
+function ratingReadDetailCache(url){let v=readJson(ratingDetailCacheKey(url),null);return v&&Array.isArray(v.points)?v:null;}
+function ratingReadDetailPoints(url){let v=ratingReadDetailCache(url);return v?v.points:null;}
+function ratingWriteDetailPoints(url,points){if(!url||!Array.isArray(points))return;writeJson(ratingDetailCacheKey(url),{checkedAt:new Date().toISOString(),points:points.map(function(p,i){return {label:'Контрольная точка '+(i+1),value:cleanLine(p&&p.value||'')||'—'};})});}
+function ratingControlPointsHaveValues(points){return Array.isArray(points)&&points.some(function(p){let v=cleanLine(p&&p.value||'');return !!v&&!/^[—–-]$/.test(v);});}
+function ratingPlaceholderControlPoints(){return [1,2,3,4,5].map(function(n){return {label:'Контрольная точка '+n,value:'—'};});}
+function ratingApplyStoredControlPoints(subjects){(subjects||[]).forEach(function(item){let cached=item&&item.detailUrl?ratingReadDetailPoints(item.detailUrl):null;ratingReplaceModuleOneWithControlPoints(item,cached||ratingPlaceholderControlPoints());});return subjects||[];}
 function ratingGroupUrl(group){let g=group||ratingGroup;return RATING_URL+'?groupid='+encodeURIComponent(g.id)+'&groupname='+encodeURIComponent(g.name);}
 async function fetchHtmlDoc(url){
   let r=await fetch(toPortalProxyUrl(url),{cache:'no-store',credentials:'same-origin'});
@@ -510,7 +537,6 @@ function parseRatingBooksDoc(doc,group){
   function add(label,url){
     try{
       let u=new URL(url,base);
-      u=new URL(toPortalProxyUrl(u.href));
       if(!/^https?:$/.test(u.protocol))return;
       let gid=u.searchParams.get('groupid');if(gid&&gid!==group.id)return;
       let params=[];u.searchParams.forEach(function(v,k){if(k!=='groupid'&&k!=='groupname'&&v)params.push(k+'='+v);});
@@ -525,6 +551,7 @@ function parseRatingBooksDoc(doc,group){
   Array.from(doc.querySelectorAll('form')).forEach(function(form){
     let action=form.getAttribute('action')||base;
     Array.from(form.querySelectorAll('select')).forEach(function(sel){
+      if(typeof ratingSelectKind==='function'&&ratingSelectKind(sel))return;
       let pname=sel.name||sel.id||'book';
       Array.from(sel.options||[]).forEach(function(opt){
         let val=String(opt.value||'').trim(),lbl=cleanLine(opt.textContent||'');
@@ -544,11 +571,606 @@ async function fetchRatingBooks(group){
   if(!books.length)throw new Error('На странице группы не найдены зачётные книжки');
   writeJson(ratingBooksKey(),{checkedAt:new Date().toISOString(),books:books});return books;
 }
+function ratingElementDescriptor(el){
+  // Descriptor is intentionally local. Do not inspect broad parent text: on the
+  // real portal the rating table lives near the period controls, and broad
+  // parent text caused discipline links to be mistaken for year/semester items.
+  let bits=[el&&el.name,el&&el.id,el&&el.getAttribute&&el.getAttribute('aria-label'),el&&el.getAttribute&&el.getAttribute('title'),el&&el.getAttribute&&el.getAttribute('data-name')].filter(Boolean).map(cleanLine);
+  try{let id=el.id;if(id){let lab=el.ownerDocument.querySelector('label[for="'+id.replace(/"/g,'\\"')+'"]');if(lab)bits.push(cleanLine(lab.textContent||''));}}catch(e){}
+  try{let lab=el.closest('label');if(lab)bits.push(cleanLine(lab.textContent||''));}catch(e){}
+  try{let prev=el.previousElementSibling;if(prev&&/label|span|b|strong|legend|h[1-6]/i.test(prev.tagName||''))bits.push(cleanLine(prev.textContent||''));}catch(e){}
+  return bits.join(' · ');
+}
+function ratingSelectDescriptor(sel){return ratingElementDescriptor(sel);}
+function ratingSelectOptions(sel){
+  return Array.from(sel&&sel.options||[]).map(function(opt){return {value:String(opt.value||''),label:cleanLine(opt.textContent||''),selected:!!opt.selected};}).filter(function(o){return o.label&&!/^(?:выберите.*|--+|—+)$/i.test(o.label);});
+}
+function ratingLooksLikeYearLabel(x){
+  x=cleanLine(x||'');
+  // A study year is a span, not an opaque portal id such as 00000015.
+  return /^(?:19|20)\d{2}\s*[-–—\/]\s*(?:(?:19|20)\d{2}|\d{2})(?:\s*(?:учебн[а-яё]*\s*год|уч\.?\s*год))?$/i.test(x)||/^(?:учебн[а-яё]*\s*год\s*)?(?:19|20)\d{2}\s*[-–—\/]\s*(?:(?:19|20)\d{2}|\d{2})$/i.test(x);
+}
+function ratingLooksLikeSemesterLabel(x){
+  x=cleanLine(x||'');
+  return /^(?:(?:[1-9]|i{1,3}|iv)\s*(?:-?\s*й)?\s*семестр|семестр\s*(?:[1-9]|i{1,3}|iv)|(?:осенн|весенн)[а-яё]*\s*семестр)$/i.test(x);
+}
+function ratingLooksLikeSemesterShort(x){return /^[1-9]$/.test(cleanLine(x||''));}
+function ratingPeriodKindFromText(text){
+  let d=cleanLine(text||'').toLowerCase();
+  if(/учебн[а-яё]*\s*год|academic\s*year|study\s*year|(?:^|[^a-zа-я])year(?:[^a-zа-я]|$)|uch(?:eb)?(?:ny)?[_-]?year|uchgod|studyyear|study_year|academic_year|schoolyear/i.test(d))return 'year';
+  if(/семестр|semester|(?:^|[^a-zа-я])sem(?:[^a-zа-я]|$)|semestr|term[_-]?id|studyterm/i.test(d))return 'semester';
+  return '';
+}
+function ratingSelectKind(sel){
+  let opts=ratingSelectOptions(sel),labels=opts.map(o=>o.label),own=[sel&&sel.name,sel&&sel.id,sel&&sel.getAttribute&&sel.getAttribute('aria-label'),sel&&sel.getAttribute&&sel.getAttribute('title')].filter(Boolean).join(' '),ownKind=ratingPeriodKindFromText(own);
+  if(ownKind)return ownKind;
+  let yearLike=labels.filter(ratingLooksLikeYearLabel).length,semLike=labels.filter(x=>ratingLooksLikeSemesterLabel(x)||ratingLooksLikeSemesterShort(x)).length;
+  if(yearLike&&yearLike>=Math.max(1,Math.ceil(opts.length*.50)))return 'year';
+  if(semLike&&semLike>=Math.max(1,Math.ceil(opts.length*.50)))return 'semester';
+  let d=ratingSelectDescriptor(sel),byText=ratingPeriodKindFromText(d);if(byText)return byText;
+  return '';
+}
+function ratingControlForKind(doc,kind){
+  let matches=Array.from(doc.querySelectorAll('select')).filter(function(sel){return ratingSelectKind(sel)===kind;});
+  if(!matches.length)return null;
+  matches.sort(function(a,b){let da=ratingSelectDescriptor(a),db=ratingSelectDescriptor(b),ra=kind==='year'?/учебн|year|год/i.test(da):/семестр|semester|sem/i.test(da),rb=kind==='year'?/учебн|year|год/i.test(db):/семестр|semester|sem/i.test(db);return Number(rb)-Number(ra);});
+  return matches[0];
+}
+function ratingAssociatedLabel(el){
+  let t='';
+  try{let id=el.id;if(id){let lab=el.ownerDocument.querySelector('label[for="'+id.replace(/"/g,'\\"')+'"]');if(lab)t=cleanLine(lab.textContent||'');}}catch(e){}
+  if(!t)try{let lab=el.closest('label');if(lab)t=cleanLine(lab.textContent||'');}catch(e){}
+  if(!t)try{let sib=el.nextElementSibling;if(sib)t=cleanLine(sib.textContent||'');}catch(e){}
+  if(!t)t=cleanLine(el.getAttribute&&el.getAttribute('aria-label')||el.value||'');
+  return t;
+}
+function ratingExtractJsUrl(el,sourceUrl){
+  let raw='';
+  try{raw=String(el.getAttribute('data-url')||el.getAttribute('data-href')||el.getAttribute('href')||'').trim();}catch(e){}
+  if(raw&&raw!=='#'&&!/^javascript:/i.test(raw)){try{return new URL(raw,sourceUrl).href;}catch(e){}}
+  let js='';try{js=String(el.getAttribute('onclick')||'');}catch(e){}
+  let m=js.match(/(?:location(?:\.href)?|window\.location(?:\.href)?)\s*=\s*['\"]([^'\"]+)['\"]/i)||js.match(/(?:open|location\.assign|location\.replace)\s*\(\s*['\"]([^'\"]+)['\"]/i);
+  if(m&&m[1])try{return new URL(m[1],sourceUrl).href;}catch(e){}
+  return '';
+}
+function ratingUrlPeriodValue(url,kind,sourceUrl){
+  try{
+    let u=new URL(url,sourceUrl),found=null;
+    u.searchParams.forEach(function(v,k){if(found)return;let kk=ratingPeriodKindFromText(k);if(kk===kind)found={field:k,value:String(v||'')};});
+    return found;
+  }catch(e){return null;}
+}
+function ratingCanonicalYearLabel(label){
+  let t=cleanLine(label||'').replace(/\s+/g,' '),m=t.match(/((?:19|20)\d{2})\s*[-–—\/]\s*((?:19|20)\d{2}|\d{2})/i);if(!m)return t;
+  let a=m[1],b=m[2];if(b.length===2)b=a.slice(0,2)+b;return a+'/'+b+' учебный год';
+}
+function ratingCanonicalYearKey(label){
+  let c=ratingCanonicalYearLabel(label),m=c.match(/((?:19|20)\d{2})\/((?:19|20)\d{2})/);return m?m[1]+'-'+m[2]:cleanLine(c).toLowerCase();
+}
+function ratingCanonicalSemesterKey(label){
+  let t=cleanLine(label||'').toLowerCase().replace(/ё/g,'е');if(/осенн/.test(t))return 'autumn';if(/весенн/.test(t))return 'spring';let m=t.match(/(?:^|\s)([1-9]|i{1,3}|iv)(?:\s|$)/i);return m?String(m[1]).toLowerCase():t;
+}
+function ratingPeriodOptionRank(o){
+  if(!o)return -1;let score=0;if(o.selected)score+=100;if(ratingOptionIsActionable(o))score+=50;let mode=String(o.mode||'').toLowerCase();if(mode==='form'||mode==='url'||mode==='catalog')score+=12;if(mode==='live')score+=8;if(mode!=='filter')score+=4;if(o.field)score+=3;if(o.url)score+=3;if(/^\d{3,}$/.test(String(o.value||'')))score+=2;return score;
+}
+function ratingMergeOptionRecord(a,b){
+  if(!a)return Object.assign({},b||{});if(!b)return Object.assign({},a||{});let preferred=ratingPeriodOptionRank(b)>ratingPeriodOptionRank(a)?b:a,other=preferred===a?b:a,out=Object.assign({},preferred);
+  ['field','url','mode','yearLabel','yearValue'].forEach(function(k){if(!out[k]&&other[k])out[k]=other[k];});out.selected=!!(a.selected||b.selected);return out;
+}
+function sanitizeRatingPeriodOptions(opts){
+  opts=opts&&typeof opts==='object'?opts:{};
+  let yearMap=new Map(),semesterMap=new Map();
+  (opts.years||[]).forEach(function(o){
+    if(!o||!ratingLooksLikeYearLabel(o.label||''))return;let item=Object.assign({},o),canonical=ratingCanonicalYearLabel(item.label||item.value||'');item.label=canonical;if(item.yearLabel)item.yearLabel=ratingCanonicalYearLabel(item.yearLabel);
+    let key=ratingCanonicalYearKey(canonical),existing=yearMap.get(key);yearMap.set(key,ratingMergeOptionRecord(existing,item));
+  });
+  (opts.semesters||[]).forEach(function(o){
+    if(!o||(!ratingLooksLikeSemesterLabel(o.label||'')&&!ratingLooksLikeSemesterShort(o.label||'')))return;let item=Object.assign({},o);if(item.yearLabel)item.yearLabel=ratingCanonicalYearLabel(item.yearLabel);
+    let yk=item.yearLabel?ratingCanonicalYearKey(item.yearLabel):'*',key=yk+'|'+ratingCanonicalSemesterKey(item.label||item.value||''),existing=semesterMap.get(key);semesterMap.set(key,ratingMergeOptionRecord(existing,item));
+  });
+  let years=Array.from(yearMap.values());years.sort(function(a,b){let ay=parseInt((a.label.match(/(?:19|20)\d{2}/)||['0'])[0],10)||0,by=parseInt((b.label.match(/(?:19|20)\d{2}/)||['0'])[0],10)||0;return by-ay;});
+  return {years:years,semesters:Array.from(semesterMap.values())};
+}
+function sanitizeRatingPeriod(p){
+  p=normalizeRatingPeriod(p||{});let yLabel=cleanLine(p.yearLabel||''),sLabel=cleanLine(p.semesterLabel||'');
+  if(!(ratingLooksLikeYearLabel(yLabel)||(!yLabel&&ratingLooksLikeYearLabel(p.year)))){p.year='';p.yearLabel='';}else if(yLabel){p.yearLabel=ratingCanonicalYearLabel(yLabel);}else if(ratingLooksLikeYearLabel(p.year)){p.yearLabel=ratingCanonicalYearLabel(p.year);}
+  if(!(ratingLooksLikeSemesterLabel(sLabel)||ratingLooksLikeSemesterShort(sLabel)||(!sLabel&&(ratingLooksLikeSemesterLabel(p.semester)||ratingLooksLikeSemesterShort(p.semester))))){p.semester='';p.semesterLabel='';}
+  return p;
+}
+function ratingPeriodOptionsFromTables(doc){
+  let years=[],semesters=[],seenY=new Set(),seenS=new Set();
+  function push(list,seen,label,kind){
+    label=cleanLine(label||'');if(!label)return;
+    if(kind==='year'&&!ratingLooksLikeYearLabel(label))return;
+    if(kind==='semester'&&!ratingLooksLikeSemesterLabel(label)&&!ratingLooksLikeSemesterShort(label))return;
+    let key=label.toLowerCase();if(seen.has(key))return;seen.add(key);
+    list.push({value:label,label:label,selected:false,field:'',url:'',mode:'filter'});
+  }
+  Array.from(doc.querySelectorAll('table')).forEach(function(table){
+    let trs=Array.from(table.querySelectorAll('tr'));if(!trs.length)return;
+    let headerIndex=-1,yidx=-1,sidx=-1;
+    for(let i=0;i<Math.min(5,trs.length);i++){
+      let cells=Array.from(trs[i].querySelectorAll('th,td')).map(td=>cleanLine(td.textContent||''));
+      let yi=cells.findIndex(x=>/учебн[а-яё]*\s*год|год\s*обучения|academic\s*year|study\s*year/i.test(x));
+      let si=cells.findIndex(x=>/семестр|semester|study\s*term/i.test(x));
+      if(yi>=0||si>=0){headerIndex=i;yidx=yi;sidx=si;break;}
+    }
+    if(headerIndex<0)return;
+    trs.slice(headerIndex+1).forEach(function(tr){
+      let cells=Array.from(tr.querySelectorAll('th,td')).map(td=>cleanLine(td.textContent||''));
+      if(yidx>=0)push(years,seenY,cells[yidx]||'','year');
+      if(sidx>=0)push(semesters,seenS,cells[sidx]||'','semester');
+    });
+  });
+  return {years:years,semesters:semesters};
+}
+function ratingExtractPeriodLabelsFromText(text){
+  text=cleanLine(text||'');let years=[],semesters=[],seenY=new Set(),seenS=new Set();
+  function add(list,seen,label){label=cleanLine(label||'');let key=label.toLowerCase();if(!label||seen.has(key))return;seen.add(key);list.push(label);}
+  let ym,yr=/(?:19|20)\d{2}\s*[-–—\/]\s*(?:(?:19|20)\d{2}|\d{2})(?:\s*(?:учебн[а-яё]*\s*год|уч\.?\s*год))?/ig;
+  while((ym=yr.exec(text)))add(years,seenY,ym[0]);
+  [/(?:осенн[а-яё]*|весенн[а-яё]*)\s+семестр/ig,/(?:[1-9]|i{1,3}|iv)\s*(?:-?\s*й)?\s*семестр/ig,/семестр\s*(?:[1-9]|i{1,3}|iv)/ig].forEach(function(re){let m;while((m=re.exec(text)))add(semesters,seenS,m[0]);});
+  return {years:years,semesters:semesters};
+}
+function ratingPeriodOptionsFromVisibleText(doc){
+  let years=[],semesters=[],seenY=new Set(),seenS=new Set();
+  function add(kind,label){
+    label=cleanLine(label||'');if(!label||label.length>70)return;
+    if(kind==='year'&&!ratingLooksLikeYearLabel(label))return;
+    if(kind==='semester'&&!ratingLooksLikeSemesterLabel(label)&&!ratingLooksLikeSemesterShort(label))return;
+    let seen=kind==='year'?seenY:seenS,list=kind==='year'?years:semesters,key=label.toLowerCase();if(seen.has(key))return;seen.add(key);
+    list.push({value:label,label:label,selected:false,field:'',url:'',mode:'filter'});
+  }
+  function scanText(t){let found=ratingExtractPeriodLabelsFromText(t);found.years.forEach(x=>add('year',x));found.semesters.forEach(x=>add('semester',x));}
+  Array.from(doc.querySelectorAll('option,label,legend,h1,h2,h3,h4,h5,h6,th,td,button,a,span,strong,b,div,p')).forEach(function(el){
+    let t=cleanLine(el.textContent||'');if(!t||t.length>180)return;
+    if(ratingLooksLikeYearLabel(t))add('year',t);
+    if(ratingLooksLikeSemesterLabel(t)||ratingLooksLikeSemesterShort(t))add('semester',t);
+    scanText(t);
+  });
+  try{let bodyText=cleanLine(doc.body&&((doc.body.innerText||doc.body.textContent)||'')||'');if(bodyText)scanText(bodyText);}catch(e){}
+  return {years:years,semesters:semesters};
+}
+function ratingMergePeriodOptions(base,extra){
+  base=sanitizeRatingPeriodOptions(base||{years:[],semesters:[]});extra=sanitizeRatingPeriodOptions(extra||{years:[],semesters:[]});
+  return sanitizeRatingPeriodOptions({years:(base.years||[]).concat(extra.years||[]),semesters:(base.semesters||[]).concat(extra.semesters||[])});
+}
+
+function ratingOptionIsActionable(o){
+  if(!o)return false;
+  if(String(o.url||'').trim())return true;
+  if(String(o.field||'').trim())return true;
+  let mode=String(o.mode||'').toLowerCase();
+  return mode==='url'||mode==='form'||mode==='catalog'||mode==='live';
+}
+function ratingActionablePeriodOptions(opts){
+  opts=sanitizeRatingPeriodOptions(opts||{years:[],semesters:[]});
+  return {years:(opts.years||[]).filter(ratingOptionIsActionable),semesters:(opts.semesters||[]).filter(ratingOptionIsActionable)};
+}
+function ratingPeriodFromVisibleDoc(doc){
+  let v=ratingPeriodOptionsFromVisibleText(doc),year=(v.years||[])[0]||null,semester=(v.semesters||[])[0]||null;
+  return {year:year?year.label:'',semester:semester?semester.label:''};
+}
+function ratingNormalizeIdentity(s){return cleanLine(s||'').toLocaleLowerCase('ru-RU').replace(/[\s‐‑‒–—-]+/g,'');}
+function ratingDocMatchesBook(doc,book){
+  if(!doc||!book||!book.label)return false;
+  let needle=ratingNormalizeIdentity(book.label);if(!needle)return false;
+  let title='';try{title=cleanLine(doc.title||'')+' '+cleanLine((doc.querySelector('h1,h2,h3,h4')||{}).textContent||'');}catch(e){}
+  let body='';try{body=cleanLine(doc.body&&((doc.body.innerText||doc.body.textContent)||'')||'');}catch(e){}
+  let hay=ratingNormalizeIdentity((title+' '+body).slice(0,24000));return hay.indexOf(needle)>=0;
+}
+function ratingCatalogLinkCandidates(doc,sourceUrl,book){
+  let out=[],seen=new Set(),baseBook='';try{baseBook=new URL(book.url,sourceUrl).href;}catch(e){baseBook=book.url||'';}
+  function add(raw){
+    if(!raw)return;try{let u=new URL(raw,sourceUrl);if(u.origin!==location.origin||!/\/student\/rating\.php$/i.test(u.pathname))return;let href=u.href;if(seen.has(href))return;seen.add(href);out.push(href);}catch(e){}
+  }
+  Array.from(doc.querySelectorAll('a[href],a[data-href],[data-url],a[onclick],button[onclick]')).forEach(function(a){
+    let raw=a.getAttribute('href')||a.getAttribute('data-href')||a.getAttribute('data-url')||ratingExtractJsUrl(a,sourceUrl)||'',label=cleanLine(a.textContent||a.getAttribute('aria-label')||a.getAttribute('title')||'');
+    let useful=ratingLooksLikeYearLabel(label)||ratingLooksLikeSemesterLabel(label)||ratingNormalizeIdentity(label)===ratingNormalizeIdentity(book.label)||/архив|предыдущ|следующ|период|учебн[а-яё]*\s*год|семестр/i.test(label);
+    if(!useful){
+      try{let u=new URL(raw,sourceUrl),b=new URL(baseBook||sourceUrl,sourceUrl),shared=0;b.searchParams.forEach(function(v,k){if(/^(?:groupid|groupname)$/i.test(k))return;if(u.searchParams.get(k)===v&&v)shared++;});useful=shared>0;}catch(e){}
+    }
+    if(useful)add(raw);
+  });
+  return out.slice(0,60);
+}
+function ratingCatalogOptions(entries){
+  let years=[],semesters=[],seenY=new Set(),seenS=new Set();
+  (entries||[]).forEach(function(e){
+    let yl=cleanLine(e.yearLabel||''),sl=cleanLine(e.semesterLabel||'');if(!ratingLooksLikeYearLabel(yl)||!ratingLooksLikeSemesterLabel(sl))return;
+    let yv=String(e.yearValue!==undefined&&e.yearValue!==null?e.yearValue:yl),sv=String(e.semesterValue!==undefined&&e.semesterValue!==null?e.semesterValue:sl);
+    let yk=yl.toLowerCase();if(!seenY.has(yk)){seenY.add(yk);years.push({value:yv,label:yl,selected:false,field:'year',url:'',mode:'catalog'});}
+    let sk=yk+'|'+sl.toLowerCase();if(!seenS.has(sk)){seenS.add(sk);semesters.push({value:sv,label:sl,selected:false,field:'sem',url:e.url||'',mode:'catalog',yearLabel:yl,yearValue:yv});}
+  });
+  years.sort(function(a,b){let ay=parseInt((a.label.match(/(?:19|20)\d{2}/)||['0'])[0],10)||0,by=parseInt((b.label.match(/(?:19|20)\d{2}/)||['0'])[0],10)||0;return by-ay;});
+  return {years:years,semesters:semesters};
+}
+function ratingSemesterOptionsForYear(options,yearLabel){
+  let yk=ratingCanonicalYearKey(yearLabel||''),filtered=(options||[]).filter(function(o){return !o.yearLabel||!yk||ratingCanonicalYearKey(o.yearLabel)===yk;}),bySem=new Map();
+  filtered.forEach(function(o){let key=ratingCanonicalSemesterKey(o.label||o.value||''),existing=bySem.get(key);bySem.set(key,ratingMergeOptionRecord(existing,o));});return Array.from(bySem.values());
+}
+
+function filterRatingTablesByPeriod(tables,period){
+  period=sanitizeRatingPeriod(period||{});if(!period.year&&!period.semester)return tables||[];
+  let out=[];(tables||[]).forEach(function(rows){
+    if(!rows||!rows.length){return;}
+    let hi=-1,yi=-1,si=-1;
+    for(let i=0;i<Math.min(5,rows.length);i++){let h=(rows[i]||[]).map(cleanLine),y=h.findIndex(x=>/учебн[а-яё]*\s*год|год\s*обучения|academic\s*year|study\s*year/i.test(x)),ss=h.findIndex(x=>/семестр|semester|study\s*term/i.test(x));if(y>=0||ss>=0){hi=i;yi=y;si=ss;break;}}
+    if(hi<0){out.push(rows);return;}
+    let head=rows.slice(0,hi+1),body=rows.slice(hi+1).filter(function(r){
+      if(period.year&&yi>=0&&cleanLine(r[yi]||'')!==cleanLine(period.yearLabel||period.year))return false;
+      if(period.semester&&si>=0){let have=cleanLine(r[si]||''),want=cleanLine(period.semesterLabel||period.semester);if(have!==want)return false;}
+      return true;
+    });
+    out.push(head.concat(body));
+  });return out;
+}
+function ratingPeriodStateFromDoc(doc,sourceUrl){
+  let years=[],semesters=[],seen={year:new Map(),semester:new Map()},fields={year:'',semester:''};
+  function add(kind,o){
+    if(kind!=='year'&&kind!=='semester')return;
+    let label=cleanLine(o&&o.label||''),value=String(o&&o.value!==undefined?o.value:'').trim(),trusted=!!(o&&o.trusted);
+    if(!label||/^(?:выберите.*|--+|—+)$/i.test(label))return;
+    // Critical safety rule: an opaque URL parameter is not a display option.
+    // This prevents discipline links containing ?year=<id>&semester=<id> from
+    // being rendered as period choices.
+    if(kind==='year'&&!ratingLooksLikeYearLabel(label))return;
+    if(kind==='semester'&&!ratingLooksLikeSemesterLabel(label)&&!(trusted&&ratingLooksLikeSemesterShort(label)))return;
+    let key='v:'+value+'|'+label.toLowerCase();let map=seen[kind];
+    if(map.has(key)){let ex=map.get(key);if(o.selected)ex.selected=true;if(!ex.url&&o.url)ex.url=o.url;return;}
+    let item={value:value||label,label:label,selected:!!(o&&o.selected),field:String(o&&o.field||''),url:String(o&&o.url||''),mode:String(o&&o.mode||'form')};
+    map.set(key,item);(kind==='year'?years:semesters).push(item);if(item.field&&!fields[kind])fields[kind]=item.field;
+  }
+  // Native selects: the control itself can establish the kind, but each year
+  // still needs a human-readable study-year label.
+  Array.from(doc.querySelectorAll('select')).forEach(function(sel){
+    let kind=ratingSelectKind(sel);if(!kind)return;let field=sel.name||sel.id||'';
+    ratingSelectOptions(sel).forEach(function(o){add(kind,{value:o.value,label:o.label,selected:o.selected||String(sel.value||'')===String(o.value),field:field,mode:'form',trusted:true});});
+  });
+  // Radio groups: classify by the field name or by a majority of valid labels;
+  // never by large surrounding container text.
+  let radioGroups={};
+  Array.from(doc.querySelectorAll('input[type="radio"][name]')).forEach(function(input){let name=input.name||'';(radioGroups[name]||(radioGroups[name]=[])).push(input);});
+  Object.keys(radioGroups).forEach(function(name){
+    let arr=radioGroups[name],labels=arr.map(ratingAssociatedLabel),kind=ratingPeriodKindFromText(name);
+    if(!kind){let yc=labels.filter(ratingLooksLikeYearLabel).length,sc=labels.filter(x=>ratingLooksLikeSemesterLabel(x)||ratingLooksLikeSemesterShort(x)).length;if(yc>=Math.max(1,Math.ceil(labels.length*.5)))kind='year';else if(sc>=Math.max(1,Math.ceil(labels.length*.5)))kind='semester';}
+    if(!kind)return;arr.forEach(function(input,i){add(kind,{value:input.value||labels[i],label:labels[i]||input.value,selected:!!input.checked,field:name,mode:'form',trusted:true});});
+  });
+  // Submit buttons are accepted only when their own name/label identifies the period.
+  Array.from(doc.querySelectorAll('button[name],input[type="submit"][name],input[type="button"][name]')).forEach(function(btn){
+    let name=btn.name||'',label=cleanLine(btn.textContent||btn.value||btn.getAttribute('aria-label')||''),kind=ratingPeriodKindFromText(name)|| (ratingLooksLikeYearLabel(label)?'year':(ratingLooksLikeSemesterLabel(label)?'semester':''));if(!kind)return;
+    let value=String(btn.value||label||'').trim();add(kind,{value:value,label:label||value,selected:/\bactive\b|\bselected\b|\bcurrent\b/i.test(btn.className||'')||btn.getAttribute('aria-pressed')==='true',field:name,mode:'form',trusted:true});
+  });
+  // Links/tabs: infer the kind ONLY from the visible label. Query params on
+  // ordinary discipline links may contain year/semester ids and must not turn
+  // those links into chooser options.
+  Array.from(doc.querySelectorAll('a[href],a[onclick],button[onclick],[data-url],[data-href]')).forEach(function(el){
+    let label=cleanLine(el.textContent||el.getAttribute('aria-label')||el.getAttribute('title')||''),kind=ratingLooksLikeYearLabel(label)?'year':(ratingLooksLikeSemesterLabel(label)?'semester':'');if(!kind)return;
+    let url=ratingExtractJsUrl(el,sourceUrl);if(!url)return;let uv=ratingUrlPeriodValue(url,kind,sourceUrl),value=uv?uv.value:label,field=uv?uv.field:'';
+    let selected=/\bactive\b|\bselected\b|\bcurrent\b/i.test(String(el.className||''))||el.getAttribute('aria-current')==='true'||el.getAttribute('aria-selected')==='true';
+    add(kind,{value:value,label:label,selected:selected,field:field,url:url,mode:'url',trusted:true});
+  });
+  // Options opened dynamically by the live portal probe.
+  Array.from(doc.querySelectorAll('[data-mguu-period-kind]')).forEach(function(el){let kind=el.getAttribute('data-mguu-period-kind')||'',label=cleanLine(el.textContent||''),value=el.getAttribute('data-value')||label;add(kind,{value:value,label:label,selected:false,field:'',url:'',mode:'live',trusted:true});});
+  // Explicit data-* period widgets still need a human-readable period label.
+  Array.from(doc.querySelectorAll('[data-year],[data-semester],[data-semestr],[data-studyyear],[data-study-year]')).forEach(function(el){
+    let kind='',value='';if(el.hasAttribute('data-year')||el.hasAttribute('data-studyyear')||el.hasAttribute('data-study-year')){kind='year';value=el.getAttribute('data-year')||el.getAttribute('data-studyyear')||el.getAttribute('data-study-year')||'';}else{kind='semester';value=el.getAttribute('data-semester')||el.getAttribute('data-semestr')||'';}
+    let label=cleanLine(el.textContent||el.getAttribute('aria-label')||''),url=ratingExtractJsUrl(el,sourceUrl);add(kind,{value:value||label,label:label||value,selected:/\bactive\b|\bselected\b|\bcurrent\b/i.test(String(el.className||'')),field:kind==='year'?'year':'semester',url:url,mode:url?'url':'form',trusted:true});
+  });
+  function selectedFor(kind,options){
+    let selected=options.find(o=>o.selected)||null;
+    if(!selected)try{let u=new URL(sourceUrl,RATING_URL);for(let o of options){if(!o.field)continue;let v=u.searchParams.get(o.field);if(v!==null&&String(v)===String(o.value)){selected=o;break;}}}catch(e){}
+    return selected||null;
+  }
+  let clean=sanitizeRatingPeriodOptions({years:years,semesters:semesters});years=clean.years;semesters=clean.semesters;
+  // Some current portal pages render the period chooser after page load, and
+  // some expose year/semester only in rating table columns. Merge both safe
+  // fallbacks instead of reporting that no variants exist.
+  let fallback=ratingMergePeriodOptions(ratingPeriodOptionsFromTables(doc),ratingPeriodOptionsFromVisibleText(doc));
+  let merged=ratingMergePeriodOptions({years:years,semesters:semesters},fallback);years=merged.years;semesters=merged.semesters;
+  let sy=selectedFor('year',years),ss=selectedFor('semester',semesters);
+  return {years:years,semesters:semesters,selected:{year:sy?sy.value:'',yearLabel:sy?sy.label:'',semester:ss?ss.value:'',semesterLabel:ss?ss.label:''},fields:fields,sourceUrl:sourceUrl};
+}
+function chooseRatingOption(options,wantedValue,wantedLabel,currentValue){
+  options=options||[];let x=null;
+  if(wantedValue)x=options.find(o=>String(o.value)===String(wantedValue));
+  if(!x&&wantedLabel)x=options.find(o=>cleanLine(o.label).toLowerCase()===cleanLine(wantedLabel).toLowerCase());
+  if(!x&&currentValue)x=options.find(o=>String(o.value)===String(currentValue));
+  if(!x)x=options.find(o=>o.selected)||options[0]||null;
+  return x;
+}
+function findRatingOptionExact(options,wantedValue,wantedLabel){
+  options=options||[];let x=null;if(wantedValue)x=options.find(o=>String(o.value)===String(wantedValue));
+  if(!x&&wantedLabel&&ratingLooksLikeYearLabel(wantedLabel))x=options.find(o=>ratingCanonicalYearKey(o.label||'')===ratingCanonicalYearKey(wantedLabel));
+  if(!x&&wantedLabel)x=options.find(o=>cleanLine(o.label).toLowerCase()===cleanLine(wantedLabel).toLowerCase());return x||null;
+}
+function ratingFormParams(form){
+  let params=new URLSearchParams();if(!form)return params;
+  Array.from(form.querySelectorAll('input[name],select[name],textarea[name]')).forEach(function(el){
+    if(el.disabled)return;let name=el.name;if(!name)return;
+    let type=(el.type||'').toLowerCase();if((type==='checkbox'||type==='radio')&&!el.checked)return;
+    if(el.tagName==='SELECT'&&el.multiple){Array.from(el.selectedOptions||[]).forEach(o=>params.append(name,String(o.value||'')));return;}
+    params.set(name,String(el.value||''));
+  });
+  return params;
+}
+function ratingPortalControlCandidates(doc,kind){
+  let word=kind==='year'?/учебн[а-яё]*\s*год|academic\s*year|study\s*year/i:/семестр|semester/i;
+  let out=[],seen=new Map();
+  function add(el,score){if(!el||!el.nodeType)return;score=score||0;if(seen.has(el)){let item=seen.get(el);if(score>item.score)item.score=score;return;}let item={el:el,score:score};seen.set(el,item);out.push(item);}
+  Array.from(doc.querySelectorAll('select,[role="combobox"],button,.select2-selection,.dropdown-toggle,.chosen-single,.form-select,.custom-select,input')).forEach(function(el){
+    let d=ratingElementDescriptor(el)+' '+cleanLine(el.textContent||el.value||'');if(word.test(d))add(el,30);
+  });
+  Array.from(doc.querySelectorAll('label,legend,span,div,p,strong,b,h1,h2,h3,h4,h5,h6')).forEach(function(label){
+    let t=cleanLine(label.textContent||'');if(!word.test(t)||t.length>80)return;
+    let base=label.closest('label,.form-group,.field,.control-group,.row,.filter,.select-wrapper,.input-group')||label.parentElement;
+    if(!base)return;
+    Array.from(base.querySelectorAll('select,[role="combobox"],button,.select2-selection,.dropdown-toggle,.chosen-single,.form-select,.custom-select,input')).forEach(function(el){add(el,60);});
+    let sib=label.nextElementSibling;if(sib&&sib.matches&&sib.matches('select,[role="combobox"],button,.select2-selection,.dropdown-toggle,.chosen-single,.form-select,.custom-select,input'))add(sib,40);
+  });
+  return out.sort((a,b)=>b.score-a.score).map(x=>x.el);
+}
+function ratingClickLikeUser(win,el){
+  if(!el)return;
+  try{el.scrollIntoView({block:'center',inline:'nearest'});}catch(e){}
+  ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(type){try{el.dispatchEvent(new win.MouseEvent(type,{bubbles:true,cancelable:true,view:win}));}catch(e){try{el.click();}catch(_){}}});
+  try{el.focus();}catch(e){}
+}
+function ratingDynamicOptions(doc,kind){
+  let result=[],seen=new Set();
+  function add(label,value,selected,field){label=cleanLine(label||'');if(!label)return;if(kind==='year'&&!ratingLooksLikeYearLabel(label))return;if(kind==='semester'&&!ratingLooksLikeSemesterLabel(label)&&!ratingLooksLikeSemesterShort(label))return;let k=label.toLowerCase()+'|'+String(value||'');if(seen.has(k))return;seen.add(k);result.push({value:String(value||label),label:label,selected:!!selected,field:String(field||''),url:'',mode:'form',trusted:true});}
+  Array.from(doc.querySelectorAll('option')).forEach(function(o){add(o.textContent,o.value,o.selected,o.parentElement&&(o.parentElement.name||o.parentElement.id));});
+  Array.from(doc.querySelectorAll('[role="option"],.select2-results__option,.dropdown-menu .dropdown-item,.dropdown-menu a,.chosen-results li,.ui-menu-item,.ui-autocomplete li,.multiselect-container li,.choices__item--choice')).forEach(function(o){let label=cleanLine(o.textContent||'');add(label,o.getAttribute('data-value')||o.getAttribute('data-select2-id')||label,o.getAttribute('aria-selected')==='true'||/selected|active|highlight/i.test(o.className||''),'');});
+  return result;
+}
+async function ratingPrimeRenderedPeriods(frame){
+  let doc=frame.contentDocument,win=frame.contentWindow;if(!doc||!win)return {years:[],semesters:[]};
+  let collected={years:[],semesters:[]};
+  async function prime(kind){
+    let candidates=ratingPortalControlCandidates(doc,kind),target=candidates[0];if(!target)return;
+    ratingClickLikeUser(win,target);await new Promise(r=>setTimeout(r,700));
+    let opts=ratingDynamicOptions(doc,kind);if(kind==='year')collected.years=opts;else collected.semesters=opts;
+    try{win.document.dispatchEvent(new win.KeyboardEvent('keydown',{key:'Escape',code:'Escape',keyCode:27,which:27,bubbles:true}));}catch(e){}
+  }
+  await prime('year');await prime('semester');return collected;
+}
+function ratingSelectedFromLiveDoc(doc,kind){
+  let sel=ratingControlForKind(doc,kind);if(sel){let o=Array.from(sel.options||[]).find(x=>x.selected)||null;if(o){let label=cleanLine(o.textContent||'');if((kind==='year'&&ratingLooksLikeYearLabel(label))||(kind==='semester'&&(ratingLooksLikeSemesterLabel(label)||ratingLooksLikeSemesterShort(label))))return {value:String(o.value||label),label:label};}}
+  let radios=Array.from(doc.querySelectorAll('input[type="radio"]:checked'));for(let r of radios){let label=ratingAssociatedLabel(r),rk=ratingPeriodKindFromText(r.name||'')||((kind==='year'&&ratingLooksLikeYearLabel(label))?'year':((kind==='semester'&&(ratingLooksLikeSemesterLabel(label)||ratingLooksLikeSemesterShort(label)))?'semester':''));if(rk===kind)return {value:String(r.value||label),label:label||String(r.value||'')};}
+  let dyn=ratingDynamicOptions(doc,kind).find(o=>o.selected);if(dyn)return {value:dyn.value,label:dyn.label};
+  let state=ratingPeriodStateFromDoc(doc,(doc.location&&doc.location.href)||location.href),arr=kind==='year'?state.years:state.semesters;return arr.find(o=>o.selected)||arr[0]||null;
+}
+function ratingBindNativePeriodItems(kind){
+  document.querySelectorAll('.ratingPeriodItem').forEach(function(btn){btn.onclick=function(){let value=this.dataset.ratingPeriodValue||'';closeModal();selectRatingPeriod(kind,value);};});
+}
+function ratingNativePickerEmptyHtml(kind,message){
+  let what=kind==='year'?'учебного года':'семестра';
+  return '<div class="ratingPeriodNativeState"><div class="ratingPeriodNativeIcon">!</div><div class="emptyTitle">Не удалось получить варианты</div><div class="muted">'+esc(message||('Портал пока не передал варианты '+what+'.'))+'</div><button id="ratingPeriodRetry" class="primary full" type="button">Повторить</button></div>';
+}
+function ratingNativePickerLoadingHtml(kind){
+  return '<div class="ratingPeriodNativeState"><div class="ratingPeriodSpinner" aria-hidden="true"></div><div class="emptyTitle">Получаем '+(kind==='year'?'учебные годы':'семестры')+'</div><div class="muted">Данные загружаются с портала МГУУ в фоне.</div></div>';
+}
+async function refreshNativeRatingPeriodPicker(kind){
+  let host=document.getElementById('ratingPeriodPickerHost');if(!host||!selectedBook)return;host.innerHTML=ratingNativePickerLoadingHtml(kind);
+  try{
+    let received=await fetchRatingPeriodOptionsFast(selectedBook);ratingPeriodCatalog=[];ratingPeriodOptions=ratingMergePeriodOptions(ratingPeriodOptions,received);ratingPeriodOptions=sanitizeRatingPeriodOptions(ratingPeriodOptions);
+    let options=ratingPickerOptions(kind);host=document.getElementById('ratingPeriodPickerHost');if(!host)return;
+    if(!options||!options.length){host.innerHTML=ratingNativePickerEmptyHtml(kind,'Портал не вернул доступные варианты. Страница портала не будет показана — можно повторить загрузку.');let retry=document.getElementById('ratingPeriodRetry');if(retry)retry.onclick=function(){refreshNativeRatingPeriodPicker(kind);};return;}
+    host.innerHTML=ratingPeriodPickerHtml(kind,options);ratingBindNativePeriodItems(kind);
+  }catch(e){host=document.getElementById('ratingPeriodPickerHost');if(!host)return;host.innerHTML=ratingNativePickerEmptyHtml(kind,e&&e.message?e.message:'Проверьте интернет-соединение.');let retry=document.getElementById('ratingPeriodRetry');if(retry)retry.onclick=function(){refreshNativeRatingPeriodPicker(kind);};}
+}
+function fetchRenderedRatingResponse(url){
+  return new Promise(function(resolve,reject){
+    let frame=document.createElement('iframe'),done=false,loadTimer=null,hardTimer=null;
+    function finish(err,result){if(done)return;done=true;clearTimeout(loadTimer);clearTimeout(hardTimer);try{frame.remove();}catch(e){}if(err)reject(err);else resolve(result);}
+    frame.setAttribute('aria-hidden','true');
+    frame.setAttribute('sandbox','allow-scripts allow-forms allow-same-origin');
+    frame.style.cssText='position:fixed;left:-10000px;top:0;width:390px;height:844px;opacity:0;pointer-events:none;border:0;z-index:-1';
+    frame.onload=function(){
+      clearTimeout(loadTimer);
+      // Give portal JavaScript time to create custom selects/tabs. Static fetches
+      // do not execute that code, which was the reason v0.37 saw no periods.
+      loadTimer=setTimeout(async function(){
+        try{
+          let d=frame.contentDocument;if(!d||!d.documentElement)throw new Error('Страница рейтинга не отобразилась');
+          let primed=await ratingPrimeRenderedPeriods(frame);
+          if((primed.years&&primed.years.length)||(primed.semesters&&primed.semesters.length)){
+            let store=d.createElement('div');store.id='mguu-period-probe';store.style.display='none';
+            (primed.years||[]).forEach(function(o){let x=d.createElement('span');x.setAttribute('data-mguu-period-kind','year');x.setAttribute('data-value',o.value||o.label);x.textContent=o.label||o.value;store.appendChild(x);});
+            (primed.semesters||[]).forEach(function(o){let x=d.createElement('span');x.setAttribute('data-mguu-period-kind','semester');x.setAttribute('data-value',o.value||o.label);x.textContent=o.label||o.value;store.appendChild(x);});
+            d.body.appendChild(store);
+          }
+          let finalUrl=url;try{finalUrl=frame.contentWindow.location.href||url;}catch(e){}
+          let html='<!doctype html>'+d.documentElement.outerHTML;
+          finish(null,{doc:new DOMParser().parseFromString(html,'text/html'),url:finalUrl,rendered:true});
+        }catch(e){finish(e);}
+      },900);
+    };
+    frame.onerror=function(){finish(new Error('Не удалось открыть страницу рейтинга'));};
+    hardTimer=setTimeout(function(){finish(new Error('Страница рейтинга загружается слишком долго'));},6500);
+    try{document.body.appendChild(frame);frame.src=new URL(url,location.href).href;}catch(e){finish(e);}
+  });
+}
+function fetchRenderedRatingSelection(url,yearChoice,semesterChoice){
+  // Some portal builds use JavaScript/custom dropdowns instead of ordinary
+  // form fields. Reproduce the user's choice inside an invisible same-origin
+  // iframe, then copy only the resulting DOM back into the native app parser.
+  return new Promise(function(resolve,reject){
+    let frame=document.createElement('iframe'),done=false,started=false,hardTimer=null;
+    function finish(err,result){if(done)return;done=true;clearTimeout(hardTimer);try{frame.remove();}catch(e){}if(err)reject(err);else resolve(result);}
+    function wait(ms){return new Promise(r=>setTimeout(r,ms));}
+    function sameLabel(a,b){return cleanLine(a||'').toLocaleLowerCase('ru-RU')===cleanLine(b||'').toLocaleLowerCase('ru-RU');}
+    function dynamicCandidates(doc){return Array.from(doc.querySelectorAll('option,[role="option"],.select2-results__option,.dropdown-menu .dropdown-item,.dropdown-menu a,.chosen-results li,.ui-menu-item,.ui-autocomplete li,.multiselect-container li,.choices__item--choice'));}
+    async function choose(kind,choice){
+      if(!choice)return false;let doc=frame.contentDocument,win=frame.contentWindow;if(!doc||!win)return false;
+      let wantedValue=String(choice.value||''),wantedLabel=cleanLine(choice.label||choice.value||'');
+      let sel=ratingControlForKind(doc,kind);
+      if(sel){
+        let opt=Array.from(sel.options||[]).find(function(o){return String(o.value||'')===wantedValue||sameLabel(o.textContent,wantedLabel);});
+        if(opt){
+          try{sel.value=opt.value;opt.selected=true;sel.dispatchEvent(new win.Event('input',{bubbles:true}));sel.dispatchEvent(new win.Event('change',{bubbles:true}));}catch(e){try{opt.selected=true;}catch(_){} }
+          await wait(1200);return true;
+        }
+      }
+      let control=(ratingPortalControlCandidates(doc,kind)||[])[0]||null;
+      if(control){ratingClickLikeUser(win,control);await wait(650);doc=frame.contentDocument||doc;win=frame.contentWindow||win;}
+      let item=dynamicCandidates(doc).find(function(o){let label=cleanLine(o.textContent||o.getAttribute('aria-label')||''),value=String(o.getAttribute('data-value')||o.getAttribute('data-select2-id')||o.value||'');return (wantedLabel&&sameLabel(label,wantedLabel))||(wantedValue&&value===wantedValue);});
+      if(item){ratingClickLikeUser(win,item);await wait(1300);return true;}
+      let radios=Array.from(doc.querySelectorAll('input[type="radio"]'));
+      let radio=radios.find(function(r){let rk=ratingPeriodKindFromText(r.name||'')||ratingPeriodKindFromText(r.id||''),label=ratingAssociatedLabel(r);return rk===kind&&((wantedValue&&String(r.value||'')===wantedValue)||(wantedLabel&&sameLabel(label,wantedLabel)));});
+      if(radio){try{radio.checked=true;radio.dispatchEvent(new win.Event('change',{bubbles:true}));radio.click();}catch(e){}await wait(1200);return true;}
+      return false;
+    }
+    async function run(){
+      if(started||done)return;started=true;
+      try{
+        await wait(850);
+        if(yearChoice)await choose('year',yearChoice);
+        if(semesterChoice)await choose('semester',semesterChoice);
+        await wait(650);
+        let d=frame.contentDocument;if(!d||!d.documentElement)throw new Error('Страница рейтинга не отобразилась');
+        // Probe the final state as well, so choosing a year can reveal the real
+        // semester list without ever exposing the portal page to the user.
+        let primed=await ratingPrimeRenderedPeriods(frame);
+        d=frame.contentDocument;if(!d||!d.documentElement)throw new Error('Страница рейтинга не отобразилась');
+        if((primed.years&&primed.years.length)||(primed.semesters&&primed.semesters.length)){
+          let old=d.getElementById('mguu-period-probe');if(old)old.remove();let store=d.createElement('div');store.id='mguu-period-probe';store.style.display='none';
+          (primed.years||[]).forEach(function(o){let x=d.createElement('span');x.setAttribute('data-mguu-period-kind','year');x.setAttribute('data-value',o.value||o.label);x.textContent=o.label||o.value;store.appendChild(x);});
+          (primed.semesters||[]).forEach(function(o){let x=d.createElement('span');x.setAttribute('data-mguu-period-kind','semester');x.setAttribute('data-value',o.value||o.label);x.textContent=o.label||o.value;store.appendChild(x);});d.body.appendChild(store);
+        }
+        let finalUrl=url;try{finalUrl=frame.contentWindow.location.href||url;}catch(e){}
+        let html='<!doctype html>'+d.documentElement.outerHTML;finish(null,{doc:new DOMParser().parseFromString(html,'text/html'),url:finalUrl,rendered:true});
+      }catch(e){finish(e);}
+    }
+    frame.setAttribute('aria-hidden','true');frame.setAttribute('sandbox','allow-scripts allow-forms allow-same-origin');frame.style.cssText='position:fixed;left:-10000px;top:0;width:390px;height:844px;opacity:0;pointer-events:none;border:0;z-index:-1';
+    frame.onload=function(){if(!started)setTimeout(run,120);};frame.onerror=function(){finish(new Error('Не удалось открыть страницу рейтинга'));};hardTimer=setTimeout(function(){finish(new Error('Страница рейтинга загружается слишком долго'));},11000);
+    try{document.body.appendChild(frame);frame.src=new URL(url,location.href).href;}catch(e){finish(e);}
+  });
+}
+
+async function fetchRatingResponse(url,options){
+  let opts=options||{};
+  // v0.41: rating data must come from the untouched portal response. A hidden
+  // rendered iframe is useful only as an optional period-control probe: on
+  // some Android WebView versions an iframe can be affected by the app shell
+  // lifecycle and then no longer contains the original rating table.
+  let r=await fetch(toPortalProxyUrl(url),Object.assign({cache:'no-store',credentials:'same-origin'},opts));
+  if(!r.ok)throw new Error('Сервер вернул '+r.status);
+  let html=await r.text();return {doc:new DOMParser().parseFromString(html,'text/html'),url:r.url||url,rendered:false};
+}
+async function fetchRatingPeriodOptionsFast(book){
+  // Same transport principle as the schedule: one direct portal request,
+  // parse the returned HTML, and keep the portal page invisible.
+  let merged={years:[],semesters:[]},errors=[];
+  try{let g=await fetchRatingResponse(ratingGroupUrl(ratingGroup)),state=ratingActionablePeriodOptions(ratingPeriodStateFromDoc(g.doc,g.url||ratingGroupUrl(ratingGroup)));merged=ratingMergePeriodOptions(merged,state);}catch(e){errors.push(e);}
+  if((!merged.years.length||!merged.semesters.length)&&book){
+    try{let b=await fetchRatingResponse(book.url),state=ratingActionablePeriodOptions(ratingPeriodStateFromDoc(b.doc,b.url||book.url));merged=ratingMergePeriodOptions(merged,state);}catch(e){errors.push(e);}
+  }
+  merged=sanitizeRatingPeriodOptions(merged);if(!merged.years.length&&!merged.semesters.length)throw (errors[0]||new Error('Портал не вернул варианты учебного периода'));return merged;
+}
+
+
+function ratingPersonalUrlInfo(raw){
+  try{
+    let u=new URL(raw,RATING_URL);if(!/\/student\/personalrating\.php$/i.test(u.pathname))return null;
+    let userid=String(u.searchParams.get('userid')||'').trim(),year=String(u.searchParams.get('year')||'').trim(),sem=String(u.searchParams.get('sem')||'').trim();
+    if(!userid)return null;return {url:u,userid:userid,year:year,sem:sem};
+  }catch(e){return null;}
+}
+function ratingPersonalUrl(book,year,sem){
+  let info=ratingPersonalUrlInfo(book&&book.url||'');if(!info)return String(book&&book.url||'');
+  let u=new URL(info.url.href);if(year!==undefined&&year!==null&&String(year)!=='')u.searchParams.set('year',String(year));if(sem!==undefined&&sem!==null&&String(sem)!=='')u.searchParams.set('sem',String(sem));return u.href;
+}
+function ratingPersonalCurrentEntry(doc,sourceUrl){
+  let info=ratingPersonalUrlInfo(sourceUrl),p=ratingPeriodFromVisibleDoc(doc);if(!info||!p.year||!p.semester)return null;
+  return {yearLabel:p.year,semesterLabel:p.semester,yearValue:info.year||p.year,semesterValue:info.sem||p.semester,url:sourceUrl};
+}
+async function discoverPersonalRatingPeriodCatalog(book,firstDoc,firstUrl){
+  let info=ratingPersonalUrlInfo(firstUrl||book.url);if(!info)return [];
+  let entries=[],seen=new Set();
+  function accept(doc,url,yearValue,semValue){
+    if(!doc||!ratingDocMatchesBook(doc,book))return;
+    let p=ratingPeriodFromVisibleDoc(doc);if(!p.year||!p.semester||!ratingLooksLikeYearLabel(p.year)||!ratingLooksLikeSemesterLabel(p.semester))return;
+    let key=cleanLine(p.year).toLowerCase()+'|'+cleanLine(p.semester).toLowerCase();if(seen.has(key))return;seen.add(key);
+    entries.push({yearLabel:p.year,semesterLabel:p.semester,yearValue:String(yearValue||''),semesterValue:String(semValue||''),url:url});
+  }
+  let current=ratingPersonalCurrentEntry(firstDoc,firstUrl||book.url);if(current){seen.add(cleanLine(current.yearLabel).toLowerCase()+'|'+cleanLine(current.semesterLabel).toLowerCase());entries.push(current);}
+  let rawYear=String(info.year||'').trim(),num=/^\d+$/.test(rawYear)?parseInt(rawYear,10):NaN,width=rawYear.length;
+  if(!Number.isFinite(num))return entries;
+  // The public portal uses personalrating.php?userid=...&year=<id>&sem=<id>.
+  // Probe nearby opaque ids and accept only labels actually returned by the portal.
+  let years=[];for(let n=Math.max(1,num-7);n<=num+1;n++)years.push(String(n).padStart(width,'0'));
+  let semValues=['0','1'],jobs=[];
+  years.forEach(function(y){semValues.forEach(function(sm){if(y===info.year&&sm===info.sem)return;jobs.push({year:y,sem:sm,url:ratingPersonalUrl(book,y,sm)});});});
+  let cursor=0,workers=Math.min(4,jobs.length);
+  async function worker(){
+    while(cursor<jobs.length){let job=jobs[cursor++];try{let r=await fetchRatingResponse(job.url);accept(r.doc,r.url||job.url,job.year,job.sem);}catch(e){}}
+  }
+  await Promise.all(Array.from({length:workers},worker));
+  entries.sort(function(a,b){let ay=parseInt((a.yearLabel.match(/(?:19|20)\d{2}/)||['0'])[0],10)||0,by=parseInt((b.yearLabel.match(/(?:19|20)\d{2}/)||['0'])[0],10)||0;if(ay!==by)return by-ay;return String(a.semesterValue).localeCompare(String(b.semesterValue),'ru',{numeric:true});});
+  return entries;
+}
+
+async function discoverRatingPeriodCatalog(book,firstDoc,firstUrl){
+  let queue=[],queued=new Set(),visited=new Set(),entries=[],entrySeen=new Set(),maxPages=28;
+  function enqueue(raw){if(!raw)return;try{let u=new URL(raw,firstUrl||book.url);if(u.origin!==location.origin||!/\/student\/rating\.php$/i.test(u.pathname))return;let href=u.href;if(queued.has(href)||visited.has(href))return;queued.add(href);queue.push(href);}catch(e){}}
+  function accept(doc,url,force){
+    let p=ratingPeriodFromVisibleDoc(doc);if(!p.year||!p.semester)return;
+    if(!force&&!ratingDocMatchesBook(doc,book))return;
+    let key=cleanLine(p.year).toLowerCase()+'|'+cleanLine(p.semester).toLowerCase();if(entrySeen.has(key))return;entrySeen.add(key);entries.push({yearLabel:p.year,semesterLabel:p.semester,url:url});
+  }
+  let start=firstUrl||book.url;enqueue(start);
+  if(firstDoc){accept(firstDoc,start,true);ratingCatalogLinkCandidates(firstDoc,start,book).forEach(enqueue);visited.add(start);queued.delete(start);}
+  try{
+    let group=await fetchRatingResponse(ratingGroupUrl(ratingGroup)),gdoc=group.doc,gurl=group.url||ratingGroupUrl(ratingGroup),needle=ratingNormalizeIdentity(book.label);
+    Array.from(gdoc.querySelectorAll('a[href]')).forEach(function(a){let label=ratingNormalizeIdentity(a.textContent||'');if(label===needle)enqueue(a.getAttribute('href'));});
+    ratingCatalogLinkCandidates(gdoc,gurl,book).forEach(enqueue);
+  }catch(e){}
+  while(queue.length&&visited.size<maxPages){
+    let url=queue.shift();queued.delete(url);if(visited.has(url))continue;visited.add(url);
+    try{
+      let r=await fetchRatingResponse(url),doc=r.doc,finalUrl=r.url||url;accept(doc,finalUrl,url===start);ratingCatalogLinkCandidates(doc,finalUrl,book).forEach(enqueue);
+    }catch(e){}
+  }
+  return entries;
+}
+
+async function discoverRenderedRatingPeriods(url){
+  try{
+    let rendered=await fetchRenderedRatingResponse(url),state=ratingPeriodStateFromDoc(rendered.doc,rendered.url||url);
+    return {years:state.years||[],semesters:state.semesters||[]};
+  }catch(e){return {years:[],semesters:[]};}
+}
+async function applyRatingPeriodControl(doc,sourceUrl,kind,value,choice){
+  choice=choice||null;
+  if(choice&&choice.url){return fetchRatingResponse(new URL(choice.url,sourceUrl).href);}
+  let sel=ratingControlForKind(doc,kind),field=choice&&choice.field?choice.field:(sel&&(sel.name||sel.id)||'');
+  if(sel&&!choice){let option=Array.from(sel.options||[]).find(o=>String(o.value||'')===String(value));let raw=option?String(option.value||'').trim():String(value||'').trim();if(/^(?:https?:\/\/|\/|\?)/i.test(raw)){try{return await fetchRatingResponse(new URL(raw,sourceUrl).href);}catch(e){if(/^https?:\/\//i.test(raw))throw e;}}}
+  if(!field)return {doc:doc,url:sourceUrl};
+  let controls=Array.from(doc.querySelectorAll('[name]')).filter(function(el){return String(el.name||'')===String(field);});
+  let control=controls.find(function(el){return el.form||el.closest&&el.closest('form');})||controls[0]||sel;
+  let form=control&&(control.form||(control.closest&&control.closest('form'))),params=ratingFormParams(form);params.set(field,String(value));
+  // If the option is represented by a submit button, keep its own name/value in the request.
+  if(choice&&choice.field)params.set(choice.field,String(choice.value||value));
+  let source=new URL(sourceUrl,RATING_URL),action=new URL((form&&form.getAttribute('action'))||source.href,source.href);
+  source.searchParams.forEach(function(v,k){if(!action.searchParams.has(k)&&!params.has(k))action.searchParams.set(k,v);});
+  let method=String(form&&form.getAttribute('method')||'GET').toUpperCase();
+  if(method==='POST')return fetchRatingResponse(action.href,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8'},body:params.toString()});
+  params.forEach(function(v,k){action.searchParams.set(k,v);});return fetchRatingResponse(action.href);
+}
 function parseRatingDoc(doc){
   let tables=[];
   Array.from(doc.querySelectorAll('table')).forEach(function(table){
-    let rows=Array.from(table.querySelectorAll('tr')).map(function(tr){return Array.from(tr.querySelectorAll('th,td')).map(td=>cleanLine(td.textContent||'')).filter(Boolean);}).filter(r=>r.length);
-    if(rows.length>=2&&Math.max.apply(null,rows.map(r=>r.length))>=2)tables.push(rows);
+    let rows=Array.from(table.querySelectorAll('tr')).map(function(tr){
+      let row=Array.from(tr.querySelectorAll('th,td')).map(td=>cleanLine(td.textContent||''));while(row.length&&!row[row.length-1])row.pop();return row;
+    }).filter(r=>r.some(Boolean));
+    if(rows.length){
+      let width=Math.max.apply(null,rows.map(r=>r.length)),joined=cleanLine(rows.map(r=>r.join(' ')).join(' '));
+      // The portal sometimes visually renders a normal rating grid while its
+      // HTML exposes the row as one packed cell. Keep such a table instead of
+      // discarding it just because width===1.
+      if(width>=2||(/дисциплин/i.test(joined)&&/(модуль|балл|рейтинг|зач[её]т|экзамен)/i.test(joined)))tables.push(rows);
+    }
   });
   let raw=[];
   Array.from(doc.querySelectorAll('h1,h2,h3,h4,h5,h6,p,li,dt,dd')).forEach(function(el){let s=cleanLine(el.textContent||'');if(s)raw.push(s);});
@@ -556,11 +1178,23 @@ function parseRatingDoc(doc){
     let low=s.toLowerCase();
     if(seen.has(s)||/университет правительства москвы|учим управлять городом|контакты|новости|ресурсы|мероприятия|сервисы|к выбору группы/i.test(low))return false;
     seen.add(s);return true;
-  }).slice(0,120);
+  }).slice(0,180);
   let title='';try{title=cleanLine((doc.querySelector('h1,h2,h3,h4')||{}).textContent||'');}catch(e){}
-  return {title:title,tables:tables,lines:lines,loadedAt:new Date().toISOString()};
+  return {title:title,tables:tables,lines:lines,subjects:[],loadedAt:new Date().toISOString()};
 }
-async function fetchRatingData(book){let doc=await fetchHtmlDoc(book.url);return parseRatingDoc(doc);}
+async function fetchRatingData(book){
+  // v0.47: same first-frame model as the schedule. One direct personalrating.php
+  // request produces the visible cards immediately. Detailed control-point pages
+  // are NOT awaited here; cached points are merged now and refreshed separately.
+  let stored=loadStoredRatingPeriod(book),targetUrl=String(book&&book.url||''),baseInfo=ratingPersonalUrlInfo(targetUrl);
+  if(baseInfo){let y=stored.year||baseInfo.year,sm=stored.semester||baseInfo.sem;targetUrl=ratingPersonalUrl(book,y,sm);}
+  let first=await fetchRatingResponse(targetUrl),doc=first.doc,sourceUrl=first.url||targetUrl,visible=ratingPeriodFromVisibleDoc(doc),info=ratingPersonalUrlInfo(sourceUrl)||baseInfo;
+  let period=sanitizeRatingPeriod({year:stored.year||(info&&info.year)||visible.year,yearLabel:visible.year||stored.yearLabel||stored.year,semester:stored.semester||(info&&info.sem)||visible.semester,semesterLabel:visible.semester||stored.semesterLabel||stored.semester});
+  let parsed=parseRatingDoc(doc),state=ratingActionablePeriodOptions(ratingPeriodStateFromDoc(doc,sourceUrl));
+  if(ratingPersonalUrlInfo(sourceUrl))parsed.subjects=ratingApplyStoredControlPoints(ratingSubjectsFromPersonalDom(doc,sourceUrl));
+  parsed.period=period;parsed.periodOptions=ratingMergePeriodOptions(ratingPeriodOptions,state);parsed.periodCatalog=[];parsed.sourceUrl=sourceUrl;parsed.detailsPending=ratingSubjectsResolved(parsed).some(function(x){return !!x.detailUrl;});return parsed;
+}
+
 function bookListHtml(books,query){
   let q=String(query||'').trim().toLocaleLowerCase('ru-RU'),list=books.filter(b=>!q||b.label.toLocaleLowerCase('ru-RU').includes(q));
   if(!list.length)return '<div class="emptySmall">Зачётные книжки не найдены</div>';
@@ -578,67 +1212,362 @@ async function openRatingBooks(){
   try{books=await fetchRatingBooks(ratingGroup);ratingBooks=books;let c=document.getElementById('bookCount'),l=document.getElementById('bookList');if(!c||!l)return;c.textContent='Зачётных книжек: '+books.length;l.innerHTML=bookListHtml(books,'');bindBookItems(books);}catch(err){if(!books||!books.length){let l=document.getElementById('bookList');if(l)l.innerHTML='<div class="emptySmall">Не удалось получить список.<br><span class="muted">'+esc(err.message||'Проверьте интернет')+'</span></div>';}}
 }
 function selectRatingBook(label,url){
-  if(!url)return;selectedBook={label:label||'Зачётная книжка',url:url};writeJson(ratingBookKey(),selectedBook);closeModal();updateBookButton();loadRating(false);
+  if(!url)return;selectedBook={label:label||'Зачётная книжка',url:url};writeJson(ratingBookKey(),selectedBook);ratingLastBackgroundAt=0;ratingPeriod=loadStoredRatingPeriod(selectedBook);ratingPeriodOptions={years:[],semesters:[]};ratingPeriodCatalog=[];ratingData=null;closeModal();updateBookButton();updateRatingPeriodControls();loadRating(false);
 }
 function updateBookButton(){let el=document.getElementById('bookName');if(el)el.textContent=selectedBook?selectedBook.label:'Выберите зачётную книжку';}
+function ratingPeriodButtonLabel(kind){
+  ratingPeriod=sanitizeRatingPeriod(ratingPeriod);
+  let value=kind==='year'?(ratingPeriod.yearLabel||ratingPeriod.year):(ratingPeriod.semesterLabel||ratingPeriod.semester);
+  if(value)return value;
+  return kind==='year'?'Учебный год':'Семестр';
+}
+function updateRatingPeriodControls(){
+  let y=document.getElementById('ratingYearValue'),s=document.getElementById('ratingSemesterValue');
+  if(y)y.textContent=ratingPeriodButtonLabel('year');
+  if(s)s.textContent=ratingPeriodButtonLabel('semester');
+  let yb=document.getElementById('ratingYear'),sb=document.getElementById('ratingSemester');
+  if(yb)yb.setAttribute('aria-label','Учебный год: '+ratingPeriodButtonLabel('year'));
+  if(sb)sb.setAttribute('aria-label','Семестр: '+ratingPeriodButtonLabel('semester'));
+}
+function ratingPickerOptions(kind){
+  if(kind==='year')return ratingPeriodOptions.years||[];
+  return ratingSemesterOptionsForYear(ratingPeriodOptions.semesters||[],ratingPeriod.yearLabel||ratingPeriod.year);
+}
+function ratingPeriodPickerHtml(kind,options){
+  let current=kind==='year'?ratingPeriod.year:ratingPeriod.semester;
+  if(!options||!options.length)return '<div class="emptySmall">Варианты пока не получены с портала.</div>';
+  return '<div class="ratingPeriodPicker">'+options.map(function(o){let active=String(o.value)===String(current);return '<button type="button" class="ratingPeriodItem'+(active?' current':'')+'" data-rating-period-value="'+esc(o.value)+'"><span>'+esc(o.label||o.value)+'</span><span class="groupMark">'+(active?'✓':'›')+'</span></button>';}).join('')+'</div>';
+}
+async function openRatingPeriodPicker(kind){
+  let title=kind==='year'?'Учебный год':'Семестр';
+  if(!selectedBook){
+    openModal(title,'<div class="emptySmall">Сначала выберите зачётную книжку.</div><button id="ratingPeriodPickBook" class="primary full" type="button">Выбрать зачётную книжку</button>');
+    let pick=document.getElementById('ratingPeriodPickBook');if(pick)pick.onclick=function(){closeModal();openRatingBooks();};
+    return;
+  }
+  let options=ratingPickerOptions(kind);
+  openModal(title,'<div id="ratingPeriodPickerHost">'+((options&&options.length)?ratingPeriodPickerHtml(kind,options):ratingNativePickerLoadingHtml(kind))+'</div>');
+  if(options&&options.length){ratingBindNativePeriodItems(kind);return;}
+  refreshNativeRatingPeriodPicker(kind);
+}
+function selectRatingPeriod(kind,value){
+  if(!selectedBook)return;let options=ratingPickerOptions(kind),found=(options||[]).find(o=>String(o.value)===String(value));
+  if(kind==='year'){ratingPeriod.year=String(value||'');ratingPeriod.yearLabel=found?ratingCanonicalYearLabel(found.label):ratingCanonicalYearLabel(String(value||''));ratingPeriod.semester='';ratingPeriod.semesterLabel='';}
+  else{ratingPeriod.semester=String(value||'');ratingPeriod.semesterLabel=found?found.label:String(value||'');}
+  saveRatingPeriod();ratingLastBackgroundAt=0;ratingLoadSeq++;updateRatingPeriodControls();
+  if(kind==='year'){ratingData=null;renderRating();setStatus('Выберите семестр');return;}
+  let cached=readJson(ratingCacheKey(selectedBook,ratingPeriod),null);if(cached){ratingData=ratingRepairControlPointDuplicatesInData(cached);ratingPeriodOptions=sanitizeRatingPeriodOptions(cached.periodOptions||ratingPeriodOptions);ratingPeriodCatalog=Array.isArray(cached.periodCatalog)?cached.periodCatalog:[];renderRating();setStatus('Показан сохранённый рейтинг · проверяем изменения...');}else{ratingData=null;renderRating();}
+  loadRating(false);
+}
 function isScoreValue(v){
   let s=cleanLine(v);
-  return /^[-–—]$/.test(s)||/^\d+(?:[.,]\d+)?(?:\s*\/\s*\d+(?:[.,]\d+)?)?$/.test(s)||/^\d+(?:[.,]\d+)?\s*(?:балл(?:а|ов)?|%)?$/i.test(s);
+  return /^[-–—]$/.test(s)||/^\d+(?:[.,]\d+)?(?:\s*\/\s*\d+(?:[.,]\d+)?)?$/.test(s)||/^\d+(?:[.,]\d+)?\s*(?:балл(?:а|ов)?|%)?$/i.test(s)||/^(?:зачтено|не\s*зачтено|незачтено|отлично|хорошо|удовлетворительно|неудовлетворительно|A|B|C|D|E|F)$/i.test(s);
 }
 function isNoiseRatingLabel(s){
   return /^(?:№|номер|п\/п|группа|фио|студент|зач[её]тная книжка|семестр|курс|форма обучения|учебный год)$/i.test(cleanLine(s));
 }
+function ratingTableShape(rows){
+  if(!rows||rows.length<2)return null;let limit=Math.min(4,rows.length),best={index:0,score:-1,subjectIndex:-1,header:rows[0]||[]};
+  for(let i=0;i<limit;i++){
+    let h=(rows[i]||[]).map(cleanLine),subjectIndex=h.findIndex(x=>/(дисциплин|предмет|наименован[а-яё]*\s+дисциплин|учебн[а-яё]*\s+дисциплин)/i.test(x));
+    let score=(subjectIndex>=0?100:0)+h.filter(x=>/(кт\s*\d*|контрольн[а-яё]*\s+точк|балл|итог|оценк|зач[её]т|экзамен|посещ|рейтинг)/i.test(x)).length*7+h.filter(Boolean).length;
+    if(score>best.score)best={index:i,score:score,subjectIndex:subjectIndex,header:h};
+  }
+  if(best.subjectIndex<0&&best.score<18)return null;
+  if(best.subjectIndex<0){
+    let body=rows.slice(best.index+1),width=Math.max.apply(null,rows.map(r=>r.length)),bestCol=-1,bestColScore=-1;
+    for(let j=0;j<width;j++){
+      let vals=body.map(r=>cleanLine(r[j]||'')).filter(Boolean);if(!vals.length)continue;let textCount=vals.filter(v=>!isScoreValue(v)&&v.length>4).length,avg=vals.reduce((a,v)=>a+v.length,0)/vals.length,score=textCount*3+avg-(isNoiseRatingLabel(best.header[j]||'')?30:0);if(score>bestColScore){bestColScore=score;bestCol=j;}
+    }
+    best.subjectIndex=bestCol;
+  }
+  return best.subjectIndex>=0?best:null;
+}
 function ratingSubjectsFromTables(tables){
   let result=[],bySubject=new Map();
   (tables||[]).forEach(function(rows){
-    if(!rows||rows.length<2)return;
-    let header=(rows[0]||[]).map(cleanLine),body=rows.slice(1);
-    let width=Math.max.apply(null,rows.map(r=>r.length));
-    let subjectIndex=header.findIndex(h=>/(дисциплин|предмет|наименован)/i.test(h));
-    if(subjectIndex<0){
-      let best=-1,bestScore=-1;
-      for(let j=0;j<width;j++){
-        let vals=body.map(r=>cleanLine(r[j]||'')).filter(Boolean);
-        if(!vals.length)continue;
-        let textCount=vals.filter(v=>!isScoreValue(v)&&v.length>4).length;
-        let avg=vals.reduce((a,v)=>a+v.length,0)/vals.length;
-        let score=textCount*3+avg-(isNoiseRatingLabel(header[j]||'')?20:0);
-        if(score>bestScore){bestScore=score;best=j;}
-      }
-      subjectIndex=best;
-    }
-    if(subjectIndex<0)return;
+    let shape=ratingTableShape(rows);if(!shape)return;let header=shape.header,body=rows.slice(shape.index+1),subjectIndex=shape.subjectIndex,width=Math.max.apply(null,rows.map(r=>r.length));
     body.forEach(function(row){
       let subject=cleanLine(row[subjectIndex]||'');
       if(!subject||subject.length<3||isScoreValue(subject)||/^(итого|всего|средний балл|рейтинг)$/i.test(subject))return;
       if(/университет|правительства москвы|контакты|новости|ресурсы|мероприятия|сервисы|правила рейтинга|к выбору группы/i.test(subject))return;
       let details=[];
-      for(let j=0;j<Math.max(header.length,row.length);j++){
-        if(j===subjectIndex)continue;
-        let value=cleanLine(row[j]||'');
-        if(!value)continue;
-        let label=cleanLine(header[j]||'');
-        if(isNoiseRatingLabel(label))continue;
-        if(!label)label='КТ '+(details.length+1);
-        let relevant=/(?:^|\s)(?:кт\s*\d*|контрольн\w*\s+точк\w*|итог|общий|сумм|балл|рейтинг|экзамен|зач[её]т)(?:$|\s)/i.test(label)||isScoreValue(value);
-        if(!relevant)continue;
+      for(let j=0;j<Math.max(width,row.length);j++){
+        if(j===subjectIndex)continue;let value=cleanLine(row[j]||'');if(!value)continue;let label=cleanLine(header[j]||'');
+        if(/^(?:№|номер|п\/п)$/i.test(label))continue;if(!label)label='Показатель '+(j+1);
         details.push({label:label,value:value});
       }
       if(!details.length)return;
-      let totalDetail=details.find(d=>/(итог|общий|сумм|всего|рейтинг)/i.test(d.label));
-      if(!totalDetail)totalDetail=details.slice().reverse().find(d=>isScoreValue(d.value));
-      let item=bySubject.get(subject);
-      if(!item){item={subject:subject,total:totalDetail?totalDetail.value:'—',details:[]};bySubject.set(subject,item);result.push(item);}
-      details.forEach(function(d){if(!item.details.some(x=>x.label===d.label&&x.value===d.value))item.details.push(d);});
-      if(totalDetail)item.total=totalDetail.value;
+      let totalDetail=details.find(d=>/(итог|общий|сумм|всего|рейтинг|результат)/i.test(d.label));if(!totalDetail)totalDetail=details.slice().reverse().find(d=>isScoreValue(d.value))||details[details.length-1];
+      let item=bySubject.get(subject);if(!item){item={subject:subject,total:totalDetail?totalDetail.value:'—',totalLabel:totalDetail?totalDetail.label:'Итог',details:[]};bySubject.set(subject,item);result.push(item);}
+      details.forEach(function(d){if(!item.details.some(x=>x.label===d.label&&x.value===d.value))item.details.push(d);});if(totalDetail){item.total=totalDetail.value;item.totalLabel=totalDetail.label;}
     });
+  });return result;
+}
+function ratingPackedMetricLabels(text){
+  text=cleanLine(text||'');let matches=[],re=/(?:модуль\s*\d+|кт\s*\d+|контрольн[а-яё]*\s+точк[а-яё]*(?:\s*\d+)?|общий\s+балл|итогов[а-яё]*\s+балл|итог|рейтинг|оценка|зач[её]т|экзамен)/ig,m;
+  while((m=re.exec(text))){let label=cleanLine(m[0]);if(!matches.some(x=>x.toLowerCase()===label.toLowerCase()))matches.push(label);}
+  return matches;
+}
+function ratingTakeTrailingScores(text,maxCount){
+  let rest=cleanLine(text||''),values=[];maxCount=Math.max(1,maxCount||6);
+  while(rest&&values.length<maxCount){
+    let parts=rest.split(/\s+/),found='',take=0;
+    for(let n=Math.min(3,parts.length);n>=1;n--){let candidate=cleanLine(parts.slice(parts.length-n).join(' '));if(isScoreValue(candidate)){found=candidate;take=n;break;}}
+    if(!found)break;values.unshift(found);parts.splice(parts.length-take,take);rest=cleanLine(parts.join(' '));
+  }
+  return {rest:rest,values:values};
+}
+function ratingSubjectsFromPackedTables(tables){
+  let result=[],bySubject=new Map();
+  (tables||[]).forEach(function(rows){
+    if(!rows||!rows.length)return;let headerIndex=-1,labels=[];
+    for(let i=0;i<Math.min(5,rows.length);i++){
+      let h=cleanLine((rows[i]||[]).join(' '));if(!/дисциплин|предмет|наименован[а-яё]*\s+дисциплин/i.test(h))continue;
+      let found=ratingPackedMetricLabels(h);if(found.length){headerIndex=i;labels=found;break;}
+    }
+    if(headerIndex<0||!labels.length)return;
+    rows.slice(headerIndex+1).forEach(function(row){
+      let text=cleanLine((row||[]).join(' '));if(!text||/^(?:итого|всего|средний балл|рейтинг)$/i.test(text))return;
+      if(/университет|правительства москвы|контакты|новости|ресурсы|мероприятия|сервисы|правила рейтинга|к выбору группы/i.test(text))return;
+      let tail=ratingTakeTrailingScores(text,labels.length);if(!tail.values.length)return;
+      let subject=tail.rest,control='';
+      let cm=subject.match(/(?:[,;]\s*|\s+)(зач[её]т|экзамен|дифференцированн[а-яё]*\s+зач[её]т)\s*$/i);
+      if(cm){control=cleanLine(cm[1]);subject=cleanLine(subject.slice(0,cm.index));}
+      subject=subject.replace(/^\s*\d+[.)]?\s+/,'').trim();
+      if(!subject||subject.length<3||isScoreValue(subject))return;
+      let usedLabels=labels.slice(Math.max(0,labels.length-tail.values.length)),details=[];
+      if(control)details.push({label:'Форма контроля',value:control});
+      tail.values.forEach(function(value,i){details.push({label:usedLabels[i]||('Показатель '+(i+1)),value:value});});
+      if(!details.length)return;
+      let totalDetail=details.find(d=>/(итог|общий|сумм|всего|рейтинг|результат)/i.test(d.label))||details.slice().reverse().find(d=>isScoreValue(d.value))||details[details.length-1];
+      let key=normalizeSubject(subject),item=bySubject.get(key);if(!item){item={subject:subject,total:totalDetail?totalDetail.value:'—',totalLabel:totalDetail?totalDetail.label:'Итог',details:[]};bySubject.set(key,item);result.push(item);}
+      details.forEach(function(d){if(!item.details.some(x=>x.label===d.label&&x.value===d.value))item.details.push(d);});if(totalDetail){item.total=totalDetail.value;item.totalLabel=totalDetail.label;}
+    });
+  });return result;
+}
+function ratingSummaryMetricLabels(doc){
+  let out=[],seen=new Set();
+  Array.from(doc.querySelectorAll('th,h3,h4,h5,h6,strong,b,span,div')).forEach(function(el){
+    if(el.children&&el.children.length)return;let t=cleanLine(el.textContent||'');if(!t||t.length>60)return;
+    if(!/^(?:модуль\s*\d+|кт\s*\d+|контрольн[а-яё]*\s+точк[а-яё]*(?:\s*\d+)?|общий\s+балл|итогов[а-яё]*\s+балл|итого|итог|рейтинг|оценка)$/i.test(t))return;
+    let k=t.toLowerCase();if(seen.has(k))return;seen.add(k);out.push(t);
+  });
+  if(!out.length)out=['Модуль 1','Модуль 2','Общий балл'];
+  if(out.length>6)out=out.slice(0,6);return out;
+}
+function ratingLeafTextNodes(doc){
+  let list=[];Array.from(doc.querySelectorAll('body *')).forEach(function(el){
+    if(el.children&&el.children.length)return;let t=cleanLine(el.textContent||'');if(!t)return;list.push({el:el,text:t});
+  });return list;
+}
+function ratingSubjectsFromPersonalDom(doc,sourceUrl){
+  let anchors=Array.from(doc.querySelectorAll('a[href]')).filter(function(a){try{return /\/student\/detailed\.php$/i.test(new URL(a.getAttribute('href')||'',sourceUrl).pathname);}catch(e){return false;}});
+  if(!anchors.length)return [];
+  let metricLabels=ratingSummaryMetricLabels(doc),leaves=ratingLeafTextNodes(doc),anchorIndex=new Map(),anchorSet=new Set(anchors);leaves.forEach(function(x,i){let a=null;try{a=x.el&&x.el.tagName==='A'?x.el:(x.el&&x.el.closest?x.el.closest('a[href]'):null);}catch(e){}if(a&&anchorSet.has(a)&&!anchorIndex.has(a))anchorIndex.set(a,i);});
+  let result=[],seen=new Set();
+  anchors.forEach(function(a,ai){
+    let rawLabel=cleanLine(a.textContent||'');if(!rawLabel)return;let href='';try{href=new URL(a.getAttribute('href')||'',sourceUrl).href;}catch(e){return;}
+    let discipline=rawLabel;try{let q=new URL(href).searchParams.get('discipline');if(q)discipline=cleanLine(q);}catch(e){}
+    let control='',subject=discipline,cm=subject.match(/(?:[,;]\s*|\s+)(зач[её]т(?:\s+с\s+оценкой)?|экзамен|дифференцированн[а-яё]*\s+зач[её]т)\s*$/i);if(cm){control=cleanLine(cm[1]);subject=cleanLine(subject.slice(0,cm.index));}
+    let key=normalizeSubject(subject);if(!subject||subject.length<3||seen.has(key))return;
+    let values=[],cur=a.parentElement,best=[];
+    for(let depth=0;cur&&depth<7;depth++,cur=cur.parentElement){
+      let vals=[];Array.from(cur.querySelectorAll('*')).forEach(function(el){if(el.children&&el.children.length)return;let t=cleanLine(el.textContent||'');if(t&&isScoreValue(t))vals.push(t);});
+      if(vals.length&&vals.length<=Math.max(8,metricLabels.length+3)){best=vals;if(vals.length>=Math.min(3,metricLabels.length))break;}
+    }
+    values=best;
+    if(!values.length){
+      let start=anchorIndex.has(a)?anchorIndex.get(a):-1,end=leaves.length;
+      for(let j=ai+1;j<anchors.length;j++){let ix=anchorIndex.get(anchors[j]);if(ix!==undefined&&ix>start){end=ix;break;}}
+      if(start>=0){for(let i=start+1;i<end&&values.length<metricLabels.length;i++){let t=leaves[i].text;if(isScoreValue(t))values.push(t);}}
+    }
+    if(!values.length)return;if(values.length>metricLabels.length)values=values.slice(values.length-metricLabels.length);
+    let labels=metricLabels.slice(Math.max(0,metricLabels.length-values.length)),details=[];if(control)details.push({label:'Форма контроля',value:control});
+    values.forEach(function(v,i){details.push({label:labels[i]||('Показатель '+(i+1)),value:v});});
+    let totalDetail=details.find(function(d){return /(итог|общий|сумм|всего|рейтинг|результат)/i.test(d.label);})||details.slice().reverse().find(function(d){return isScoreValue(d.value);});
+    seen.add(key);result.push({subject:subject,total:totalDetail?totalDetail.value:'—',totalLabel:totalDetail?totalDetail.label:'Итог',details:details,detailUrl:href});
   });
   return result;
 }
+
+function ratingDetailControlPointNumber(text){
+  let t=cleanLine(text||'').toLowerCase().replace(/ё/g,'е');if(!t)return 0;
+  let m=t.match(/(?:^|\b)(?:кт|контрольн[а-яё]*\s+точк[а-яё]*|точк[а-яё]*)\s*(?:№\s*)?([1-5])(?:\b|$)/i);
+  if(!m)m=t.match(/(?:^|\b)([1-5])\s*(?:-?я|-?й)?\s*(?:контрольн[а-яё]*\s+точк[а-яё]*|точк[а-яё]*)(?:\b|$)/i);return m?parseInt(m[1],10):0;
+}
+function ratingDetailScoreValue(text){
+  let t=cleanLine(text||'');if(!t)return '';
+  if(/^(?:—|–|-)$/i.test(t))return '—';
+  let exact=t.match(/^(-?\d{1,3}(?:[.,]\d{1,2})?)\s*(?:балл(?:а|ов)?|б\.)?$/i);
+  if(exact){let n=parseFloat(exact[1].replace(',','.'));if(Number.isFinite(n)&&n>=0&&n<=100)return exact[1].replace('.',',');}
+  let pref=t.match(/(?:балл(?:ы|а|ов)?|оценк[а-яё]*)\s*[:=]?\s*(-?\d{1,3}(?:[.,]\d{1,2})?)/i);
+  if(pref){let n=parseFloat(pref[1].replace(',','.'));if(Number.isFinite(n)&&n>=0&&n<=100)return pref[1].replace('.',',');}
+  let from=t.match(/^(-?\d{1,3}(?:[.,]\d{1,2})?)\s*(?:из|\/|\\)\s*\d{1,3}(?:[.,]\d{1,2})?$/i);
+  if(from){let n=parseFloat(from[1].replace(',','.'));if(Number.isFinite(n)&&n>=0&&n<=100)return from[1].replace('.',',');}
+  return '';
+}
+function ratingModuleOneControlPointsFromDetailDoc(doc){
+  let found=new Map();
+  function setPoint(n,value){n=Number(n)||0;value=ratingDetailScoreValue(value);if(n>=1&&n<=5&&value!==''&&!found.has(n))found.set(n,value);}
+  function complete(){return found.size>=5;}
+  // 1) Ordinary vertical rows: "Контрольная точка 1 | 8".
+  Array.from(doc.querySelectorAll('tr')).forEach(function(tr){
+    if(complete())return;let cells=Array.from(tr.querySelectorAll('th,td')),texts=cells.map(function(c){return cleanLine(c.textContent||'');});
+    texts.forEach(function(t,i){let n=ratingDetailControlPointNumber(t);if(!n||found.has(n))return;
+      let ownTail=t.replace(/.*?(?:кт|контрольн[а-яё]*\s+точк[а-яё]*|точк[а-яё]*)\s*(?:№\s*)?[1-5]/i,'').trim(),own=ratingDetailScoreValue(ownTail);if(own){setPoint(n,own);return;}
+      for(let j=i+1;j<texts.length&&j<=i+3;j++){let v=ratingDetailScoreValue(texts[j]);if(v){setPoint(n,v);break;}if(ratingDetailControlPointNumber(texts[j]))break;}
+    });
+  });
+  // 2) Header columns: KT1..KT5 in one row and scores in the following row.
+  Array.from(doc.querySelectorAll('table')).forEach(function(table){
+    if(complete())return;let rows=Array.from(table.querySelectorAll('tr'));for(let ri=0;ri<rows.length-1&&!complete();ri++){
+      let heads=Array.from(rows[ri].querySelectorAll('th,td')).map(function(c){return cleanLine(c.textContent||'');}),cols=[];
+      heads.forEach(function(t,i){let n=ratingDetailControlPointNumber(t);if(n)cols.push({n:n,i:i});});if(cols.length<2)continue;
+      for(let rj=ri+1;rj<Math.min(rows.length,ri+4)&&!complete();rj++){
+        let vals=Array.from(rows[rj].querySelectorAll('th,td')).map(function(c){return cleanLine(c.textContent||'');}),good=0,pairs=[];
+        cols.forEach(function(c){let v=c.i<vals.length?ratingDetailScoreValue(vals[c.i]):'';if(v){good++;pairs.push([c.n,v]);}});
+        if(good>=Math.min(3,cols.length)){pairs.forEach(function(x){setPoint(x[0],x[1]);});break;}
+      }
+    }
+  });
+  // 3) Leaf-node layout used by responsive/mobile portal markup.
+  if(!complete()){
+    let leaves=[];Array.from(doc.querySelectorAll('body *')).forEach(function(el){if(el.children&&el.children.length)return;let t=cleanLine(el.textContent||'');if(t)leaves.push(t);});
+    for(let i=0;i<leaves.length&&!complete();i++){
+      let n=ratingDetailControlPointNumber(leaves[i]);if(!n||found.has(n))continue;
+      for(let j=i+1;j<leaves.length&&j<=i+4;j++){if(ratingDetailControlPointNumber(leaves[j]))break;let v=ratingDetailScoreValue(leaves[j]);if(v){setPoint(n,v);break;}}
+    }
+  }
+  // 4) Inputs/data attributes, if the portal renders scores through form controls.
+  if(!complete())Array.from(doc.querySelectorAll('input,select,textarea,[data-value],[aria-label],[title]')).forEach(function(el){
+    if(complete())return;let label=[el.getAttribute('aria-label'),el.getAttribute('title'),el.getAttribute('name'),el.getAttribute('id')].filter(Boolean).join(' '),n=ratingDetailControlPointNumber(label);if(!n||found.has(n))return;
+    let v=el.value!==undefined?String(el.value||''):String(el.getAttribute('data-value')||el.textContent||'');setPoint(n,v);
+  });
+  // 5) Some portal tables identify rows only by the point number (1..5), while
+  // a nearby cell names the section "Модуль 1". Use such rows only inside a
+  // table/section that explicitly contains "Модуль 1", avoiding guessed scores.
+  if(!complete())Array.from(doc.querySelectorAll('table')).forEach(function(table){
+    if(complete())return;let all=cleanLine(table.textContent||'');if(!/модуль\s*1/i.test(all))return;
+    Array.from(table.querySelectorAll('tr')).forEach(function(tr){if(complete())return;let cells=Array.from(tr.querySelectorAll('th,td')).map(function(c){return cleanLine(c.textContent||'');});if(cells.length<2)return;
+      let n=0;for(let i=0;i<Math.min(3,cells.length);i++){let m=cells[i].match(/^(?:кт\s*)?(?:№\s*)?([1-5])(?:\s*(?:контрольн[а-яё]*\s+точк[а-яё]*))?$/i);if(m){n=parseInt(m[1],10);break;}}
+      if(!n||found.has(n))return;for(let j=cells.length-1;j>=0;j--){let v=ratingDetailScoreValue(cells[j]);if(v&&String(v)!==String(n)){setPoint(n,v);break;}}
+    });
+  });
+  let out=[];for(let n=1;n<=5;n++)out.push({label:'Контрольная точка '+n,value:found.has(n)?found.get(n):'—'});return out;
+}
+function ratingReplaceModuleOneWithControlPoints(item,points){
+  // v0.48: this function is deliberately idempotent. v0.47 inserted another
+  // five rows every time a cached subject was refreshed because after the
+  // first pass there was no longer a "Модуль 1" row to replace. Strip every
+  // existing Module 1 / control-point row first, then insert exactly five once.
+  if(!item)return item;let source=Array.isArray(item.details)?item.details:[],out=[],anchor=-1;
+  source.forEach(function(d){
+    let label=cleanLine(d&&d.label||''),isModuleOne=/^модуль\s*1$/i.test(label),isPoint=/^контрольная\s+точка\s+[1-5]$/i.test(label);
+    if(isModuleOne||isPoint){
+      if(anchor<0)anchor=out.length;
+      if(isModuleOne&&!item.moduleOneTotal){item.moduleOneTotal=cleanLine(d&&d.value||'');}
+      return;
+    }
+    out.push(d);
+  });
+  if(anchor<0){anchor=out.findIndex(function(d){return /^модуль\s*2$/i.test(cleanLine(d&&d.label||''));});if(anchor<0)anchor=out.findIndex(function(d){return /(итог|общий|сумм|всего|рейтинг|результат)/i.test(cleanLine(d&&d.label||''));});if(anchor<0)anchor=out.length;}
+  let normalized=[];for(let i=0;i<5;i++){let p=points&&points[i];normalized.push({label:'Контрольная точка '+(i+1),value:cleanLine(p&&p.value||'')||'—'});}
+  out.splice.apply(out,[anchor,0].concat(normalized));item.details=out;return item;
+}
+async function ratingEnrichModuleOneControlPoints(subjects){
+  let list=Array.isArray(subjects)?subjects:[],jobs=list.map(function(item,index){return {item:item,index:index,url:String(item&&item.detailUrl||'')};}).filter(function(j){return !!j.url;}),cursor=0;
+  async function worker(){while(cursor<jobs.length){let job=jobs[cursor++],points=[];try{let r=await fetchRatingResponse(job.url);points=ratingModuleOneControlPointsFromDetailDoc(r.doc);}catch(e){points=ratingModuleOneControlPointsFromDetailDoc(new DOMParser().parseFromString('<html></html>','text/html'));}ratingReplaceModuleOneWithControlPoints(job.item,points);}}
+  let workers=Math.min(12,jobs.length);if(workers)await Promise.all(Array.from({length:workers},worker));
+  // Even if a detail page is temporarily unavailable, the UI contract is five
+  // control points instead of the aggregate Module 1. Missing portal values are
+  // shown as an em dash; Module 2 and Общий балл stay untouched.
+  list.forEach(function(item){if(!(item.details||[]).some(function(d){return /^контрольная\s+точка\s+1$/i.test(cleanLine(d&&d.label||''));}))ratingReplaceModuleOneWithControlPoints(item,[1,2,3,4,5].map(function(n){return {label:'Контрольная точка '+n,value:'—'};}));});
+  return list;
+}
+
+function ratingDetailDocHasPointStructure(doc){
+  let text='';try{text=cleanLine(doc&&doc.body&&doc.body.textContent||'');}catch(e){}return /(?:\bкт|контрольн[а-яё]*\s+точк[а-яё]*|\bточк[а-яё]*)\s*(?:№\s*)?[1-5](?:\b|$)/i.test(text);
+}
+function ratingFetchDetailControlPoints(url){
+  url=String(url||'');if(!url)return Promise.resolve({points:ratingPlaceholderControlPoints(),recognized:false});
+  if(ratingDetailInflight.has(url))return ratingDetailInflight.get(url);
+  let task=(async function(){let r=await fetchRatingResponse(url),points=ratingModuleOneControlPointsFromDetailDoc(r.doc);return {points:points,recognized:ratingDetailDocHasPointStructure(r.doc)};})().finally(function(){ratingDetailInflight.delete(url);});
+  ratingDetailInflight.set(url,task);return task;
+}
+function ratingContextMatches(ctx){
+  if(!ctx)return false;let p=normalizeRatingPeriod(ratingPeriod);return String(ratingGroup&&ratingGroup.id||'')===String(ctx.groupId||'')&&String(selectedBook&&selectedBook.url||'')===String(ctx.bookUrl||'')&&String(p.year||'')===String(ctx.period&&ctx.period.year||'')&&String(p.semester||'')===String(ctx.period&&ctx.period.semester||'');
+}
+function ratingSubjectItem(data,subject){return ratingSubjectsResolved(data).find(function(x){return normalizeSubject(x.subject)===normalizeSubject(subject);})||null;}
+function ratingControlPointsFromItem(item){let map=new Map();(item&&item.details||[]).forEach(function(d){let m=cleanLine(d&&d.label||'').match(/^контрольная\s+точка\s+([1-5])$/i);if(m)map.set(Number(m[1]),{label:'Контрольная точка '+m[1],value:cleanLine(d&&d.value||'')||'—'});});let out=[];for(let n=1;n<=5;n++)if(map.has(n))out.push(map.get(n));return out.length===5?out:null;}
+function ratingRepairControlPointDuplicatesInData(data){
+  if(!data)return data;ratingSubjectsResolved(data).forEach(function(item){
+    let hasModule=(item.details||[]).some(function(d){return /^модуль\s*1$/i.test(cleanLine(d&&d.label||''));});
+    let hasPoint=(item.details||[]).some(function(d){return /^контрольная\s+точка\s+[1-5]$/i.test(cleanLine(d&&d.label||''));});
+    if(!hasModule&&!hasPoint&&!item.detailUrl)return;
+    let points=ratingControlPointsFromItem(item)||(item.detailUrl?ratingReadDetailPoints(item.detailUrl):null)||ratingPlaceholderControlPoints();ratingReplaceModuleOneWithControlPoints(item,points);
+  });return data;
+}
+function ratingRepairAllCachedControlPointsV048(){
+  try{if(localStorage.getItem(K_RATING_CACHE_REPAIR_V048)==='1')return;let changed=0;
+    for(let i=0;i<localStorage.length;i++){let key=localStorage.key(i);if(!key||key.indexOf(K_RATING_CACHE_BASE+'_')!==0)continue;let data=readJson(key,null);if(!data)continue;ratingRepairControlPointDuplicatesInData(data);writeJson(key,data);changed++;}
+    localStorage.setItem(K_RATING_CACHE_REPAIR_V048,'1');
+  }catch(e){}
+}
+function ratingSummarySubjectSnapshot(item){
+  item=item||{};let details=item.details||[],find=function(re){let d=details.find(function(x){return re.test(cleanLine(x&&x.label||''));});return d?cleanLine(d.value||''):'';};
+  return {subject:normalizeSubject(item.subject||''),form:find(/^форма\s+контроля$/i),module1:cleanLine(item.moduleOneTotal||find(/^модуль\s*1$/i)),module2:find(/^модуль\s*2$/i),total:cleanLine(item.total||find(/^(?:общий\s+балл|итог|итого|рейтинг|результат)$/i))};
+}
+function ratingSummaryChangedSubjects(oldData,newData){
+  let fresh=ratingSubjectsResolved(newData),old=ratingSubjectsResolved(oldData),oldMap=new Map();old.forEach(function(x){oldMap.set(normalizeSubject(x.subject||''),ratingSummarySubjectSnapshot(x));});
+  if(!old.length)return fresh.map(function(x){return x.subject;});let changed=[];
+  fresh.forEach(function(x){let key=normalizeSubject(x.subject||''),before=oldMap.get(key),after=ratingSummarySubjectSnapshot(x);if(!before||JSON.stringify(before)!==JSON.stringify(after))changed.push(x.subject);});return changed;
+}
+function ratingDetailSubjectsToRefresh(data,baseline,forceAll){
+  let list=ratingSubjectsResolved(data);if(forceAll||!baseline)return list.filter(function(x){return !!x.detailUrl;}).map(function(x){return x.subject;});
+  let changed=new Set(ratingSummaryChangedSubjects(baseline,data).map(normalizeSubject));return list.filter(function(x){return !!x.detailUrl&&(!ratingReadDetailCache(x.detailUrl)||changed.has(normalizeSubject(x.subject)));}).map(function(x){return x.subject;});
+}
+function ratingSeedDetailPointsFromCache(data,baseline){
+  if(!baseline)return data;ratingSubjectsResolved(data).forEach(function(item){if(!item||!item.detailUrl||ratingReadDetailCache(item.detailUrl))return;let old=ratingSubjectItem(baseline,item.subject),points=ratingControlPointsFromItem(old);if(!points)return;ratingWriteDetailPoints(item.detailUrl,points);ratingReplaceModuleOneWithControlPoints(item,points);});return data;
+}
+function ratingPatchControlPointRows(subject,points){
+  let card=Array.from(document.querySelectorAll('.ratingCard[data-rating-subject]')).find(function(c){return normalizeSubject(c.dataset.ratingSubject||'')===normalizeSubject(subject);});if(!card)return;
+  (points||[]).slice(0,5).forEach(function(p,i){let label='Контрольная точка '+(i+1),row=Array.from(card.querySelectorAll('.ratingPoint')).find(function(r){return normalizeSubject(r.dataset.ratingLabel||'')===normalizeSubject(label);});if(!row)return;let value=cleanLine(p&&p.value||'')||'—',b=row.querySelector('b');row.dataset.ratingValue=value;if(b)b.textContent=value;});
+}
+async function ratingRefreshControlPointsProgressively(data,ctx,baseline,subjectsToRefresh){
+  let wanted=Array.isArray(subjectsToRefresh)?new Set(subjectsToRefresh.map(normalizeSubject)):null,list=ratingSubjectsResolved(data),jobs=list.map(function(item){return {subject:item.subject,url:String(item&&item.detailUrl||'')};}).filter(function(j){return !!j.url&&(!wanted||wanted.has(normalizeSubject(j.subject)));}),cursor=0,run=++ratingDetailRunSeq;
+  async function worker(){
+    while(cursor<jobs.length){let job=jobs[cursor++],result=null;try{result=await ratingFetchDetailControlPoints(job.url);}catch(e){continue;}
+      let previous=ratingReadDetailCache(job.url);if(!result||(!result.recognized&&!ratingControlPointsHaveValues(result.points)))continue;
+      let points=result.points||ratingPlaceholderControlPoints();ratingWriteDetailPoints(job.url,points);
+      let item=ratingSubjectItem(data,job.subject);if(item)ratingReplaceModuleOneWithControlPoints(item,points);
+      data.detailsPending=true;data.detailsUpdatedAt=new Date().toISOString();writeJson(ctx.cacheKey,data);
+      if(ratingContextMatches(ctx)){
+        let live=ratingSubjectItem(ratingData,job.subject);if(live)ratingReplaceModuleOneWithControlPoints(live,points);if(section==='rating')ratingPatchControlPointRows(job.subject,points);
+      }
+    }
+  }
+  let workers=Math.min(8,jobs.length);if(workers)await Promise.all(Array.from({length:workers},worker));
+  data.detailsPending=false;data.detailsLoadedAt=new Date().toISOString();writeJson(ctx.cacheKey,data);
+  if(run!==ratingDetailRunSeq)return;
+  if(!ctx.scopeChanged){let changed=ratingScoreChanges(baseline,data);if(changed.length&&ratingContextMatches(ctx))addRatingChangeNotifications(changed,data);}
+  if(ratingContextMatches(ctx)){
+    if(ratingData!==data){ratingData=data;renderRating();}
+    let suffix=[ctx.period.yearLabel,ctx.period.semesterLabel].filter(Boolean).join(' · ');if(section==='rating')setStatus('Рейтинг обновлён'+(suffix?' · '+suffix:'')+' · '+new Date().toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}));
+  }
+}
+
+function ratingSubjectsResolved(data){
+  if(data&&Array.isArray(data.subjects)&&data.subjects.length)return data.subjects;
+  let tables=Array.isArray(data)?data:((data&&data.tables)||[]),regular=ratingSubjectsFromTables(tables),packed=ratingSubjectsFromPackedTables(tables);
+  if(!regular.length)return packed;if(!packed.length)return regular;
+  let out=regular.slice(),seen=new Set(out.map(x=>normalizeSubject(x.subject)));packed.forEach(function(x){let k=normalizeSubject(x.subject);if(!seen.has(k)){seen.add(k);out.push(x);}});return out;
+}
+
 function ratingCardHtml(item,index){
   let bg=cardColor(item.subject),fg=textColor(bg),subjectMarks=ratingMarksForSubject(item.subject),marked=subjectMarks.length||pendingRatingSubjects.some(x=>normalizeSubject(x)===normalizeSubject(item.subject));
-  let details=item.details.map(function(d){let total=/(итог|общий|сумм|всего|рейтинг)/i.test(d.label);return '<div class="ratingPoint'+(total?' total':'')+'" data-rating-label="'+esc(d.label)+'" data-rating-value="'+esc(d.value)+'"><span>'+esc(d.label)+'</span><b>'+esc(d.value)+'</b></div>';}).join('');
-  return '<article class="ratingCard" data-rating-subject="'+esc(item.subject)+'" style="--card:'+bg+';--ink:'+fg+'"><button class="ratingCardHead" type="button" data-rating-index="'+index+'" aria-expanded="false"><div class="ratingSubject">'+esc(item.subject)+'</div><div class="ratingTotal"><span>Общий балл</span><b>'+esc(item.total||'—')+'</b></div><svg class="ratingChevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"/></svg>'+(marked?changeDotHtml('cardChangeDot'):'')+'</button><div class="ratingDetails hidden">'+details+'</div></article>';
+  let details=item.details.map(function(d){let total=/(итог|общий|сумм|всего|рейтинг|результат)/i.test(d.label);return '<div class="ratingPoint'+(total?' total':'')+'" data-rating-label="'+esc(d.label)+'" data-rating-value="'+esc(d.value)+'"><span>'+esc(d.label)+'</span><b>'+esc(d.value)+'</b></div>';}).join('');
+  return '<article class="ratingCard" data-rating-subject="'+esc(item.subject)+'" style="--card:'+bg+';--ink:'+fg+'"><button class="ratingCardHead" type="button" data-rating-index="'+index+'" aria-expanded="false"><div class="ratingSubject">'+esc(item.subject)+'</div><div class="ratingTotal"><span>'+esc(item.totalLabel||'Итог')+'</span><b>'+esc(item.total||'—')+'</b></div><svg class="ratingChevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"/></svg>'+(marked?changeDotHtml('cardChangeDot'):'')+'</button><div class="ratingDetails hidden">'+details+'</div></article>';
 }
 function revealRatingScoreMarks(card){
   if(!card)return;let subject=card.dataset.ratingSubject||'',marks=ratingMarksForSubject(subject);if(!marks.length)return;
@@ -655,33 +1584,86 @@ function applyPendingRatingNavigation(){
   if((!pendingRatingSubjects||!pendingRatingSubjects.length)&&(!pendingRatingMarks||!pendingRatingMarks.length))return;
   let wanted=[...new Set((pendingRatingSubjects||[]).concat((pendingRatingMarks||[]).map(x=>x.subject)))].map(x=>normalizeSubject(x)),first=null;
   document.querySelectorAll('.ratingCard[data-rating-subject]').forEach(function(card){let subject=normalizeSubject(card.dataset.ratingSubject||'');if(!wanted.includes(subject))return;card.classList.add('notificationTarget');if(!first)first=card;});
-  if(first){setTimeout(function(){first.scrollIntoView({behavior:'smooth',block:'center'});},100);setTimeout(function(){document.querySelectorAll('.ratingCard.notificationTarget').forEach(x=>x.classList.remove('notificationTarget'));},2600);}
+  if(first){
+    let head=first.querySelector('.ratingCardHead'),details=first.querySelector('.ratingDetails');if(head&&details){details.classList.remove('hidden');head.setAttribute('aria-expanded','true');first.classList.add('open');}
+    revealRatingScoreMarks(first);
+    let firstMark=ratingMarksForSubject(first.dataset.ratingSubject||'')[0],targetRow=null;if(firstMark){let rows=Array.from(first.querySelectorAll('.ratingPoint'));targetRow=rows.find(function(r){return normalizeSubject(r.dataset.ratingLabel||'')===normalizeSubject(firstMark.label)&&(!firstMark.newValue||String(r.dataset.ratingValue||'')===String(firstMark.newValue));})||rows.find(function(r){return normalizeSubject(r.dataset.ratingLabel||'')===normalizeSubject(firstMark.label);});}
+    setTimeout(function(){(targetRow||first).scrollIntoView({behavior:'smooth',block:'center'});},120);
+    setTimeout(function(){document.querySelectorAll('.ratingCard.notificationTarget').forEach(x=>x.classList.remove('notificationTarget'));},2600);
+    setTimeout(function(){pendingRatingSubjects=[];pendingRatingMarks=[];document.querySelectorAll('.ratingCard .cardChangeDot').forEach(function(x){x.remove();});},4600);
+  }
+}
+function renderRating(){
+  let c=document.getElementById('ratingContent');if(!c)return;updateBookButton();updateRatingPeriodControls();if(ratingData)ratingRepairControlPointDuplicatesInData(ratingData);
+  if(!selectedBook){c.innerHTML='<div class="empty"><div class="emptyTitle">Выберите зачётную книжку</div><button id="pickBookNow" class="primary">Выбрать</button></div>';let b=document.getElementById('pickBookNow');if(b)b.onclick=openRatingBooks;return;}
+  if(ratingPeriod.year&&!ratingPeriod.semester){c.innerHTML='<div class="empty"><div class="emptyTitle">Выберите семестр</div></div>';return;}
+  if(!ratingData){c.innerHTML='<div class="loading">Загрузка рейтинга...</div>';return;}
+  let subjects=ratingSubjectsResolved(ratingData);
+  if(!subjects.length){c.innerHTML='<div class="empty"><div class="emptyTitle">Дисциплины рейтинга не найдены</div></div>';return;}
+  c.innerHTML='<div class="ratingCards">'+subjects.map(ratingCardHtml).join('')+'</div>';bindRatingCards();applyPendingRatingNavigation();
+}
+async function loadRating(forceDetails){
+  if(section!=='rating')return;if(!selectedBook){renderRating();setStatus('Выберите зачётную книжку');return;}if(ratingPeriod.year&&!ratingPeriod.semester){renderRating();setStatus('Выберите семестр');return;}
+  let run=++ratingLoadSeq,requestGroup=String(ratingGroup.id||''),requestBookUrl=String(selectedBook.url||''),requestPeriod=normalizeRatingPeriod(ratingPeriod),requestKey=ratingCacheKey(selectedBook,requestPeriod),baseline=readJson(requestKey,null);if(baseline)ratingRepairControlPointDuplicatesInData(baseline);
+  if(!ratingData&&baseline){ratingData=baseline;ratingPeriod=sanitizeRatingPeriod(baseline.period||ratingPeriod);ratingPeriodOptions=sanitizeRatingPeriodOptions(baseline.periodOptions||ratingPeriodOptions);ratingPeriodCatalog=Array.isArray(baseline.periodCatalog)?baseline.periodCatalog:[];renderRating();}
+  ratingBusy=true;setBusy(true);setStatus(baseline?'Проверяем изменения рейтинга...':'Загружаем рейтинг...');if(!ratingData)renderRating();
+  try{
+    let data=await fetchRatingData(selectedBook);if(run!==ratingLoadSeq)return;if(requestGroup!==String(ratingGroup.id||'')||requestBookUrl!==String(selectedBook&&selectedBook.url||''))return;
+    let current=normalizeRatingPeriod(ratingPeriod);if(String(current.year||'')!==String(requestPeriod.year||'')||String(current.semester||'')!==String(requestPeriod.semester||''))return;
+    ratingLastBackgroundAt=Date.now();try{localStorage.setItem(K_RATING_BG_LAST,String(ratingLastBackgroundAt));}catch(e){}
+    ratingPeriod=sanitizeRatingPeriod(data.period);ratingPeriodOptions=sanitizeRatingPeriodOptions(data.periodOptions||{years:[],semesters:[]});ratingPeriodCatalog=Array.isArray(data.periodCatalog)?data.periodCatalog:[];saveRatingPeriod();
+    let finalKey=ratingCacheKey(selectedBook,ratingPeriod),oldData=readJson(finalKey,null)||baseline;if(oldData)ratingRepairControlPointDuplicatesInData(oldData);ratingSeedDetailPointsFromCache(data,oldData);ratingRepairControlPointDuplicatesInData(data);
+    let notifyScope=ratingNotificationScope(selectedBook),scopeChanged=localStorage.getItem(K_NOTIFY_RATING_SCOPE)!==notifyScope;localStorage.setItem(K_NOTIFY_RATING_SCOPE,notifyScope);
+    let detailSubjects=ratingDetailSubjectsToRefresh(data,oldData,!!forceDetails);data.detailsPending=detailSubjects.length>0;ratingData=data;writeJson(finalKey,data);renderRating();
+    let suffix=[ratingPeriod.yearLabel,ratingPeriod.semesterLabel].filter(Boolean).join(' · ');
+    if(!detailSubjects.length){data.detailsPending=false;data.detailsLoadedAt=new Date().toISOString();writeJson(finalKey,data);setStatus('Рейтинг актуален'+(suffix?' · '+suffix:'')+' · '+new Date().toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}));if(!scopeChanged){let changed=ratingScoreChanges(oldData,data);if(changed.length)addRatingChangeNotifications(changed,data);}return;}
+    setStatus('Рейтинг загружен'+(suffix?' · '+suffix:'')+' · уточняем изменившиеся оценки в фоне');
+    let ctx={groupId:String(ratingGroup.id||''),bookUrl:String(selectedBook.url||''),period:normalizeRatingPeriod(ratingPeriod),cacheKey:finalKey,scopeChanged:scopeChanged};ratingRefreshControlPointsProgressively(data,ctx,oldData,detailSubjects);
+  }catch(err){
+    if(run!==ratingLoadSeq)return;let cache=readJson(requestKey,null);if(cache){ratingData=ratingRepairControlPointDuplicatesInData(cache);ratingPeriod=sanitizeRatingPeriod(cache.period||ratingPeriod);ratingPeriodOptions=sanitizeRatingPeriodOptions(cache.periodOptions||ratingPeriodOptions);ratingPeriodCatalog=Array.isArray(cache.periodCatalog)?cache.periodCatalog:[];setStatus('Нет сети — показана сохранённая версия');renderRating();}
+    else{let c=document.getElementById('ratingContent');if(c)c.innerHTML='<div class="empty"><div class="emptyTitle">Рейтинг не загрузился</div><div class="muted">'+esc(err.message||'Проверьте интернет')+'</div><button id="retryRating" class="primary">Повторить</button></div>';let b=document.getElementById('retryRating');if(b)b.onclick=()=>loadRating(true);setStatus('Не удалось загрузить рейтинг');}
+  }finally{if(run===ratingLoadSeq){ratingBusy=false;setBusy(false);dismissSplash();}}
 }
 
-function renderRating(){
-  let c=document.getElementById('ratingContent');if(!c)return;
-  updateBookButton();
-  if(!selectedBook){c.innerHTML='<div class="empty"><div class="emptyTitle">Выберите зачётную книжку</div><button id="pickBookNow" class="primary">Выбрать</button></div>';let b=document.getElementById('pickBookNow');if(b)b.onclick=openRatingBooks;return;}
-  if(!ratingData){c.innerHTML='<div class="loading">Загрузка рейтинга...</div>';return;}
-  let subjects=ratingSubjectsFromTables(ratingData.tables||[]);
-  if(!subjects.length){c.innerHTML='<div class="empty"><div class="emptyTitle">Данные рейтинга не найдены</div></div>';return;}
-  c.innerHTML='<div class="ratingCards">'+subjects.map(ratingCardHtml).join('')+'</div>';
-  bindRatingCards();applyPendingRatingNavigation();
+function ratingHydrateStoredState(){
+  let storedBook=readJson(ratingBookKey(),null),storedPeriod=storedBook?loadStoredRatingPeriod(storedBook):normalizeRatingPeriod({}),sameBook=!!(selectedBook&&storedBook&&String(selectedBook.url||'')===String(storedBook.url||'')),samePeriod=sameBook&&String(ratingPeriod.year||'')===String(storedPeriod.year||'')&&String(ratingPeriod.semester||'')===String(storedPeriod.semester||'');
+  let cachedBooks=readJson(ratingBooksKey(),null);ratingBooks=cachedBooks&&cachedBooks.books?cachedBooks.books:[];
+  selectedBook=storedBook;ratingPeriod=storedPeriod;
+  if(!selectedBook){ratingData=null;ratingPeriodOptions={years:[],semesters:[]};ratingPeriodCatalog=[];updateBookButton();updateRatingPeriodControls();renderRating();return false;}
+  let cache=readJson(ratingCacheKey(selectedBook,ratingPeriod),null),sameData=!!(samePeriod&&ratingData&&cache&&String(ratingData.loadedAt||'')===String(cache.loadedAt||''));
+  if(sameData){updateBookButton();updateRatingPeriodControls();return true;}
+  ratingPeriodOptions={years:[],semesters:[]};ratingPeriodCatalog=[];
+  if(cache){ratingData=ratingRepairControlPointDuplicatesInData(cache);ratingPeriod=sanitizeRatingPeriod(cache.period||ratingPeriod);ratingPeriodOptions=sanitizeRatingPeriodOptions(cache.periodOptions||ratingPeriodOptions);ratingPeriodCatalog=Array.isArray(cache.periodCatalog)?cache.periodCatalog:[];updateBookButton();updateRatingPeriodControls();renderRating();return true;}
+  ratingData=null;updateBookButton();updateRatingPeriodControls();renderRating();return false;
 }
-async function loadRating(){
-  if(section!=='rating')return;
-  if(!selectedBook){renderRating();setStatus('Выберите зачётную книжку');return;}
-  if(ratingBusy)return;ratingBusy=true;setBusy(true);setStatus('Загружаем рейтинг...');ratingData=null;renderRating();
-  try{let notifyScope=ratingNotificationScope(selectedBook);let scopeChanged=localStorage.getItem(K_NOTIFY_RATING_SCOPE)!==notifyScope;localStorage.setItem(K_NOTIFY_RATING_SCOPE,notifyScope);let oldData=readJson(ratingCacheKey(selectedBook),null);let data=await fetchRatingData(selectedBook);let changed=ratingScoreChanges(oldData,data);ratingData=data;writeJson(ratingCacheKey(selectedBook),data);if(changed.length&&!scopeChanged){addRatingChangeNotifications(changed,data);}setStatus('Рейтинг обновлён '+new Date().toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}));renderRating();}
-  catch(err){let cache=readJson(ratingCacheKey(selectedBook),null);if(cache){ratingData=cache;setStatus('Нет сети — показана сохранённая версия');renderRating();}else{let c=document.getElementById('ratingContent');if(c)c.innerHTML='<div class="empty"><div class="emptyTitle">Рейтинг не загрузился</div><div class="muted">'+esc(err.message||'Проверьте интернет')+'</div><button id="retryRating" class="primary">Повторить</button></div>';let b=document.getElementById('retryRating');if(b)b.onclick=()=>loadRating();setStatus('Не удалось загрузить рейтинг');}}
-  finally{ratingBusy=false;setBusy(false);dismissSplash();}
+async function checkRatingInBackground(force){
+  if(!selectedBook){selectedBook=readJson(ratingBookKey(),null);ratingPeriod=selectedBook?loadStoredRatingPeriod(selectedBook):normalizeRatingPeriod({});}
+  if(!selectedBook||ratingBackgroundBusy||ratingBusy)return;if(ratingPeriod.year&&!ratingPeriod.semester)return;
+  let now=Date.now();if(!force&&now-ratingLastBackgroundAt<RATING_BACKGROUND_INTERVAL)return;
+  let requestGroup=String(ratingGroup.id||''),requestBookUrl=String(selectedBook.url||''),requestPeriod=normalizeRatingPeriod(ratingPeriod),requestKey=ratingCacheKey(selectedBook,requestPeriod),oldData=readJson(requestKey,null);if(oldData)ratingRepairControlPointDuplicatesInData(oldData);
+  ratingBackgroundBusy=true;ratingLastBackgroundAt=now;try{localStorage.setItem(K_RATING_BG_LAST,String(now));}catch(e){}
+  try{
+    let data=await fetchRatingData(selectedBook);if(requestGroup!==String(ratingGroup.id||'')||requestBookUrl!==String(selectedBook&&selectedBook.url||''))return;let current=normalizeRatingPeriod(ratingPeriod);if(String(current.year||'')!==String(requestPeriod.year||'')||String(current.semester||'')!==String(requestPeriod.semester||''))return;
+    let actualPeriod=sanitizeRatingPeriod(data.period||requestPeriod),finalKey=ratingCacheKey(selectedBook,actualPeriod),baseline=readJson(finalKey,null)||oldData;if(baseline)ratingRepairControlPointDuplicatesInData(baseline);ratingSeedDetailPointsFromCache(data,baseline);ratingRepairControlPointDuplicatesInData(data);
+    let notifyScope=ratingNotificationScope(selectedBook),scopeChanged=localStorage.getItem(K_NOTIFY_RATING_SCOPE)!==notifyScope;localStorage.setItem(K_NOTIFY_RATING_SCOPE,notifyScope);let detailSubjects=ratingDetailSubjectsToRefresh(data,baseline,!!force);data.detailsPending=detailSubjects.length>0;writeJson(finalKey,data);
+    if(section==='rating'&&ratingContextMatches({groupId:requestGroup,bookUrl:requestBookUrl,period:actualPeriod})){ratingData=data;ratingPeriod=actualPeriod;ratingPeriodOptions=sanitizeRatingPeriodOptions(data.periodOptions||ratingPeriodOptions);ratingPeriodCatalog=Array.isArray(data.periodCatalog)?data.periodCatalog:[];saveRatingPeriod();renderRating();}
+    if(!detailSubjects.length){if(!scopeChanged){let changed=ratingScoreChanges(baseline,data);if(changed.length&&ratingContextMatches({groupId:requestGroup,bookUrl:requestBookUrl,period:actualPeriod}))addRatingChangeNotifications(changed,data);}return;}
+    let ctx={groupId:requestGroup,bookUrl:requestBookUrl,period:actualPeriod,cacheKey:finalKey,scopeChanged:scopeChanged};ratingRefreshControlPointsProgressively(data,ctx,baseline,detailSubjects);
+  }catch(e){}finally{ratingBackgroundBusy=false;}
+}
+
+function startRatingBackgroundChecks(){
+  setTimeout(function(){if(!document.hidden)checkRatingInBackground(false);},1600);
+  if(ratingBackgroundTimer)clearInterval(ratingBackgroundTimer);ratingBackgroundTimer=setInterval(function(){if(!document.hidden)checkRatingInBackground(false);},RATING_BACKGROUND_INTERVAL);
+  document.addEventListener('visibilitychange',function(){if(!document.hidden){if(section==='rating')ratingHydrateStoredState();checkRatingInBackground(false);}});
 }
 async function loadRatingBooks(){
-  selectedBook=readJson(ratingBookKey(),null);updateBookButton();let cached=readJson(ratingBooksKey(),null);ratingBooks=cached&&cached.books?cached.books:[];
-  if(selectedBook){let cache=readJson(ratingCacheKey(selectedBook),null);if(cache){ratingData=cache;renderRating();}}
-  else renderRating();
-  if(selectedBook)loadRating();
+  let hadCache=ratingHydrateStoredState();
+  if(!selectedBook){dismissSplash();return;}
+  if(hadCache){let suffix=[ratingPeriod.yearLabel,ratingPeriod.semesterLabel].filter(Boolean).join(' · ');setStatus('Сохранённый рейтинг'+(suffix?' · '+suffix:''));dismissSplash();setTimeout(function(){checkRatingInBackground(false);},250);return;}
+  loadRating();
 }
+
 function mergeGroupLists(){
   let out=[],seen=new Set();
   Array.from(arguments).forEach(function(list){(list||[]).forEach(function(g){if(!g||!g.id||!g.name)return;let key=g.id+'|'+g.name;if(seen.has(key))return;seen.add(key);out.push({id:String(g.id),name:String(g.name)});});});
@@ -867,7 +1849,13 @@ function installShell(){
       <main id="content"><div class="loading">Загрузка расписания...</div></main>
     </div>
     <div id="ratingView" class="hidden">
-      <section class="ratingControls"><button id="bookSelect" class="bookSelect"><span id="bookName">Выберите зачётную книжку</span><svg class="groupChevron" viewBox="0 0 24 24"><path d="m7 10 5 5 5-5"/></svg></button></section>
+      <section class="ratingControls">
+        <button id="bookSelect" class="bookSelect"><span id="bookName">Выберите зачётную книжку</span><svg class="groupChevron" viewBox="0 0 24 24"><path d="m7 10 5 5 5-5"/></svg></button>
+        <div class="ratingPeriodControls">
+          <button id="ratingYear" class="ratingPeriodButton" type="button"><strong id="ratingYearValue">Учебный год</strong><svg class="groupChevron" viewBox="0 0 24 24"><path d="m7 10 5 5 5-5"/></svg></button>
+          <button id="ratingSemester" class="ratingPeriodButton" type="button"><strong id="ratingSemesterValue">Семестр</strong><svg class="groupChevron" viewBox="0 0 24 24"><path d="m7 10 5 5 5-5"/></svg></button>
+        </div>
+      </section>
       <main id="ratingContent"><div class="loading">Загрузка рейтинга...</div></main>
     </div>
     <div id="sdoView" class="hidden"><main id="sdoContent"><div class="sdoLoading"><div class="sdoSpinner"></div><b>Загрузка СДО...</b></div></main></div>
@@ -897,9 +1885,11 @@ function bindUi(){
   document.querySelectorAll('.tabs button').forEach(b=>b.onclick=function(){let m=b.dataset.mode;if(m==='calendar'){openPeriodPicker();return;}setMode(m);});
   document.getElementById('prev').onclick=()=>movePeriod(-1);
   document.getElementById('next').onclick=()=>movePeriod(1);
-  document.getElementById('refresh').onclick=()=>section==='rating'?loadRating():(section==='sdo'?loadSdo(false):loadMain(false));
+  document.getElementById('refresh').onclick=()=>section==='rating'?loadRating(true):(section==='sdo'?loadSdo(false):loadMain(false));
   document.getElementById('groupSelect').onclick=()=>section==='rating'?openRatingGroups():openGroups();
   document.getElementById('bookSelect').onclick=openRatingBooks;
+  document.getElementById('ratingYear').onclick=function(){openRatingPeriodPicker('year');};
+  document.getElementById('ratingSemester').onclick=function(){openRatingPeriodPicker('semester');};
   document.getElementById('palette').onclick=openColors;
   document.getElementById('theme').onclick=toggleTheme;
   document.getElementById('modalClose').onclick=closeModal;
@@ -934,7 +1924,7 @@ function applySection(){
   if(!schedule||!rating||!sdo)return;
   let isRating=section==='rating',isSdo=section==='sdo';
   schedule.classList.toggle('hidden',isRating||isSdo);rating.classList.toggle('hidden',!isRating);sdo.classList.toggle('hidden',!isSdo);palette.classList.toggle('hidden',isRating||isSdo);groupSelect.classList.toggle('hidden',isSdo);title.textContent=isSdo?'СДО':(isRating?'Рейтинг студентов':'Расписание занятий');
-  document.querySelectorAll('.drawerItem').forEach(b=>b.classList.toggle('active',b.dataset.section===section));updateGroupButton();updateBookButton();
+  document.querySelectorAll('.drawerItem').forEach(b=>b.classList.toggle('active',b.dataset.section===section));updateGroupButton();updateBookButton();if(isRating)updateRatingPeriodControls();
 }
 function setMode(m){mode=m;document.querySelectorAll('.tabs button').forEach(b=>b.classList.toggle('active',b.dataset.mode===m));document.querySelector('.navrow').classList.toggle('hidden',m==='calendar');render();}
 function movePeriod(dir){if(mode==='day')selectedDate=addDays(selectedDate,dir);else if(mode==='week')weekDate=addDays(weekDate,dir*7);render();}
@@ -1067,7 +2057,8 @@ const CSS=`
 .sdoDashboard{padding:0 14px 24px;display:flex;flex-direction:column;gap:13px}.sdoProfile{display:grid;grid-template-columns:52px minmax(0,1fr) auto;align-items:center;gap:11px;padding:14px;border-radius:19px;background:linear-gradient(135deg,#dfe7ff,#f2e8ff);color:#273450;box-shadow:0 5px 16px rgba(47,61,98,.09)}.sdoAvatar{width:52px;height:52px;display:flex;align-items:center;justify-content:center;border-radius:17px;background:#fff;color:#586bd5;font-size:23px;font-weight:900;box-shadow:0 3px 10px rgba(48,60,96,.12)}.sdoProfile div:nth-child(2){display:flex;min-width:0;flex-direction:column}.sdoProfile span,.sdoProfile small{font-size:11px;opacity:.72}.sdoProfile b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:16px;margin:2px 0}.sdoLogout{border:0;border-radius:12px;padding:9px 10px;background:rgba(255,255,255,.72);color:#4b5b79;font-weight:800}.sdoWarning{padding:11px 13px;border-radius:14px;background:#fff1d7;color:#765223;font-size:12px;line-height:1.4}.sdoBlock{padding:13px;border-radius:19px;background:#fff;box-shadow:0 4px 14px rgba(40,50,70,.07)}.sdoBlockTitle{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}.sdoBlockTitle h2{margin:0;font-size:18px}.sdoBlockTitle span{min-width:26px;padding:4px 7px;border-radius:999px;background:#edf0fa;color:#586bd5;text-align:center;font-size:11px;font-weight:850}.sdoDeadlineList,.sdoCourseList,.sdoGradeList{display:flex;flex-direction:column;gap:8px}.sdoDeadline{display:grid;grid-template-columns:92px minmax(0,1fr);gap:2px 10px;width:100%;padding:11px;border:0;border-radius:14px;background:#f5f6fa;color:#273142;text-align:left}.sdoDeadlineDate{grid-row:1/3;align-self:center;color:#6c7bdd;font-size:11px;font-weight:800}.sdoDeadline b{font-size:13px;line-height:1.3}.sdoDeadline span:last-child{color:#7b8495;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sdoCourseCard{display:grid;grid-template-columns:40px minmax(0,1fr) 20px;align-items:center;gap:10px;width:100%;padding:11px;border:0;border-radius:15px;background:#f5f6fa;color:#273142;text-align:left}.sdoCourseIcon{width:40px;height:40px;display:flex;align-items:center;justify-content:center;border-radius:13px;background:#e6ebff;color:#6175df;font-size:20px}.sdoCourseCard>div:nth-child(2){min-width:0;display:flex;flex-direction:column;gap:3px}.sdoCourseCard b{font-size:13px;line-height:1.28}.sdoCourseCard span,.sdoCourseCard small{color:#7b8495;font-size:10px}.sdoCourseCard svg,.sdoCourseSection button svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round}.sdoProgress{height:5px!important;display:block;margin-top:3px;border-radius:999px;background:#e1e5ee;overflow:hidden}.sdoProgress i{display:block;height:100%;border-radius:999px;background:#7285ef}.sdoGradeCard{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;padding:11px 12px;border:0;border-radius:14px;background:#f5f6fa;color:#273142;text-align:left}.sdoGradeCard span{font-size:12px;font-weight:700}.sdoGradeCard b{font-size:17px;color:#7d57ae}.sdoOfficial{width:100%;min-height:46px}.sdoEmpty{padding:18px 10px;color:#8992a3;text-align:center;font-size:12px}.sdoLoading{min-height:55vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;color:#6c7586}.sdoSpinner{width:30px;height:30px;border:3px solid #d9deea;border-top-color:#7285ef;border-radius:50%;animation:sdoSpin .85s linear infinite}@keyframes sdoSpin{to{transform:rotate(360deg)}}.sdoLoginWrap{padding:18px 14px 28px}.sdoLoginCard{max-width:470px;margin:0 auto;padding:20px 16px;border-radius:23px;background:#fff;box-shadow:0 7px 24px rgba(37,49,76,.1)}.sdoSeal{display:flex;justify-content:center}.sdoSeal img{width:92px;height:92px;object-fit:contain}.sdoLoginCard h2{margin:10px 0 7px;text-align:center}.sdoLoginCard>p{margin:0 auto 17px;max-width:330px;color:#6f798b;text-align:center;font-size:13px;line-height:1.45}.sdoLoginForm{display:flex;flex-direction:column;gap:12px}.sdoLoginForm label{display:flex;flex-direction:column;gap:6px;color:#596477;font-size:12px;font-weight:800}.sdoLoginForm input{width:100%;box-sizing:border-box;padding:13px 12px;border:1px solid #d9dee8;border-radius:13px;background:#f8f9fb;color:#202938;font-size:16px;outline:none}.sdoLoginForm input:focus{border-color:#7b8ced;box-shadow:0 0 0 3px rgba(114,133,239,.14)}.sdoPassword{position:relative}.sdoPassword input{padding-right:47px}.sdoPassword button{position:absolute;right:4px;top:4px;bottom:4px;width:39px;border:0;border-radius:10px;background:transparent;color:#6f7de0;font-size:19px}.sdoPrivacy{margin:14px 0 11px;padding:11px;border-radius:13px;background:#f1f4fb;color:#6b7587;font-size:11px;line-height:1.45}.sdoPrivacy b{display:block;color:#4d5b73}.sdoError{margin-bottom:12px;padding:10px 11px;border-radius:12px;background:#ffe8e6;color:#9b332d;font-size:12px;line-height:1.4}.sdoCourseModal{display:flex;flex-direction:column;gap:12px}.sdoCourseSection{overflow:hidden;border:1px solid #e5e8ef;border-radius:15px}.sdoCourseSection h3{margin:0;padding:12px 12px 8px;font-size:15px}.sdoCourseSection>p{margin:0;padding:0 12px 10px;color:#737d8e;font-size:11px;line-height:1.4}.sdoCourseSection button{width:100%;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:11px 12px;border:0;border-top:1px solid #eef0f4;background:transparent;color:#263142;text-align:left}.sdoCourseSection button span{display:flex;flex-direction:column;gap:3px}.sdoCourseSection button b{font-size:12px}.sdoCourseSection button small{color:#8891a1}.sdoCourseGrade{display:flex;justify-content:space-between;gap:10px;padding:10px 12px;border-top:1px solid #eef0f4;font-size:12px}.sdoCourseGrade b{color:#7d57ae}.modalSdoLoading{min-height:240px}.notificationCard.sdoNotice{border-left-color:#3f9b7a}.sdoNotice .notificationType,.sdoNotice .notificationOpen{color:#2f8d6c}
 #app[data-theme=dark] .sdoProfile{background:linear-gradient(135deg,#29334b,#3a2f4c);color:#eef2fa}#app[data-theme=dark] .sdoAvatar{background:#1b2029;color:#9dacff}#app[data-theme=dark] .sdoLogout{background:rgba(28,32,42,.68);color:#dce3f0}#app[data-theme=dark] .sdoBlock,#app[data-theme=dark] .sdoLoginCard{background:#1c2028;color:#edf1f7}#app[data-theme=dark] .sdoDeadline,#app[data-theme=dark] .sdoCourseCard,#app[data-theme=dark] .sdoGradeCard{background:#252a34;color:#e7ebf3}#app[data-theme=dark] .sdoCourseIcon{background:#32394c;color:#aebcff}#app[data-theme=dark] .sdoLoginForm input{background:#242933;border-color:#3b424f;color:#f1f4f9}#app[data-theme=dark] .sdoPrivacy{background:#252b36;color:#b7c0cf}#app[data-theme=dark] .sdoPrivacy b{color:#e2e7ef}#app[data-theme=dark] .sdoCourseSection{border-color:#363d49}#app[data-theme=dark] .sdoCourseSection button,#app[data-theme=dark] .sdoCourseGrade{color:#e8edf5;border-color:#323845}
 html.samsung-fold .top{padding-top:max(38px,calc(env(safe-area-inset-top,0px) + 14px))}html.android-edge:not(.samsung-fold) .top{padding-top:max(28px,calc(env(safe-area-inset-top,0px) + 12px))}@media(max-width:390px) and (min-height:700px){.top{padding-top:max(30px,calc(env(safe-area-inset-top,0px) + 12px))}}@media(max-width:360px){.title{font-size:23px}.lesson{grid-template-columns:42px 65px 1fr}.info h3{font-size:15px}.top{padding-left:12px;padding-right:12px}.tabs,.changeBanner{margin-left:12px;margin-right:12px}main{padding-left:11px;padding-right:11px}}
-/* iPhone / Safari / Home Screen — v0.32 / Vercel */
+.ratingControls{display:flex;flex-direction:column;gap:10px;padding:3px 16px 13px}.ratingPeriodControls{display:grid;grid-template-columns:1fr 1fr;gap:9px}.ratingPeriodButton{position:relative;display:grid;grid-template-columns:minmax(0,1fr) 18px;align-items:center;column-gap:8px;min-width:0;min-height:54px;padding:10px 12px;border:0;border-radius:14px;background:#e9edf5;color:#334155;text-align:left;box-shadow:0 2px 7px rgba(45,57,82,.05)}.ratingPeriodButton>strong{grid-column:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:800}.ratingPeriodButton .groupChevron{grid-column:2;width:17px;height:17px}.ratingPeriodButton:active{transform:scale(.985);filter:brightness(.97)}.ratingPeriodPicker{display:flex;flex-direction:column;gap:7px}.ratingPeriodNativeState{min-height:190px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:20px 10px}.ratingPeriodNativeState .emptyTitle{margin-top:10px}.ratingPeriodNativeIcon{width:42px;height:42px;border-radius:14px;display:flex;align-items:center;justify-content:center;background:#e9edf8;color:#5b6fe8;font-size:22px;font-weight:900}.ratingPeriodSpinner{width:34px;height:34px;border-radius:50%;border:3px solid rgba(91,111,232,.18);border-top-color:#5b6fe8;animation:spin .8s linear infinite}#app[data-theme=dark] .ratingPeriodNativeIcon{background:#30374a;color:#c9d2ff}#app[data-theme=dark] .ratingPeriodSpinner{border-color:rgba(201,210,255,.18);border-top-color:#c9d2ff}.ratingPeriodItem{width:100%;display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:48px;padding:11px 13px;border:0;border-radius:14px;background:#f1f3f8;color:#2c3749;text-align:left;font-size:13px;font-weight:780}.ratingPeriodItem.current{background:#e4e9ff;color:#4051ad}.ratingDetails{background:rgba(255,255,255,.24)}#app[data-theme=dark] .ratingPeriodButton{background:#242832;color:#e8edf5}#app[data-theme=dark] .ratingPeriodItem{background:#242933;color:#edf1f7}#app[data-theme=dark] .ratingPeriodItem.current{background:#313a5a;color:#c9d2ff}@media(max-width:370px){.ratingPeriodControls{grid-template-columns:1fr}.ratingCardHead{grid-template-columns:minmax(0,1fr) auto 22px}.ratingTotal b{font-size:19px}}
+/* iPhone / Safari / Home Screen — v0.34 / Vercel */
 @supports (-webkit-touch-callout:none){html,body{overscroll-behavior:none;-webkit-text-size-adjust:100%}#app{min-height:100dvh}.top{padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}.tabs{margin-left:max(16px,env(safe-area-inset-left,0px));margin-right:max(16px,env(safe-area-inset-right,0px))}.navrow{padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}.changeBanner{margin-left:max(16px,env(safe-area-inset-left,0px));margin-right:max(16px,env(safe-area-inset-right,0px))}main,.sdoDashboard{padding-left:max(14px,env(safe-area-inset-left,0px));padding-right:max(14px,env(safe-area-inset-right,0px))}footer{padding-left:max(17px,env(safe-area-inset-left,0px));padding-right:max(17px,env(safe-area-inset-right,0px));padding-bottom:max(12px,env(safe-area-inset-bottom,0px))}.modalBox{padding-bottom:max(16px,calc(env(safe-area-inset-bottom,0px) + 10px))}.notificationPanel{padding-left:max(14px,env(safe-area-inset-left,0px));padding-right:max(14px,env(safe-area-inset-right,0px))}.drawer{padding-left:max(14px,env(safe-area-inset-left,0px))}input,select,textarea{font-size:16px!important}}
 `;
 
@@ -1078,9 +2069,11 @@ document.addEventListener('click',function(ev){
 
 let initialEvents=[];try{initialEvents=parseScheduleDoc(document);}catch(e){}
 installShell();
+ratingRepairAllCachedControlPointsV048();
 nativeNotificationAction('ready');
 let cache=readGroupJson(K_CACHE_BASE,null);if(cache&&cache.events&&cache.events.length){allEvents=cache.events;lastRange={start:cache.start,end:cache.end};render();setStatus('Показана сохранённая версия, проверяем обновления...');setTimeout(dismissSplash,1050);}else if(selectedGroup.id===DEFAULT_GROUP.id&&initialEvents.length){allEvents=initialEvents;render();setTimeout(dismissSplash,1050);}
 updateBanner();
+startRatingBackgroundChecks();
 setTimeout(dismissSplash,4500);
 if(section==='rating')loadRatingBooks();else if(section==='sdo')loadSdo(false);else loadMain(true);
 handlePwaNotificationLink();

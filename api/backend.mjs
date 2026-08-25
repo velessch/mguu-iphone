@@ -1,7 +1,9 @@
 import crypto from "node:crypto";
 import {URL} from "node:url";
 
-const APP_VERSION="0.32";
+export const maxDuration = 60;
+
+const APP_VERSION="0.34";
 const SDO_BASE_URL=new URL(process.env.MGUU_SDO_BASE_URL||"https://online.mguu.ru/");
 const COOKIE_NAME="mguu_sdo_session";
 const COOKIE_AGE=30*24*60*60;
@@ -9,7 +11,7 @@ const suppliedSecret=String(process.env.MGUU_SESSION_SECRET||"");
 const sessionKey=suppliedSecret?crypto.createHash("sha256").update(suppliedSecret).digest():null;
 if(!suppliedSecret)console.warn("MGUU_SESSION_SECRET is not set: SDO login is disabled until it is configured in Vercel.");
 
-const ALLOWED_PORTAL=new Set(["/student/scheduler1.php","/student/rating.php"]);
+const ALLOWED_PORTAL=new Set(["/student/scheduler1.php","/student/rating.php","/student/personalrating.php","/student/detailed.php"]);
 
 function send(res,status,body,type,headers){
   const out=Buffer.isBuffer(body)?body:Buffer.from(String(body==null?"":body));

@@ -1,7 +1,7 @@
 {
-  "version": "0.32",
+  "version": "0.34",
   "target": "iPhone / Safari / PWA / Vercel",
-  "based_on": "MGUU Web v0.31",
+  "based_on": "MGUU Web v0.33",
   "backend": "Vercel Node.js Function: api/backend.mjs",
   "routes": [
     "/api/* -> Vercel Function",
@@ -16,6 +16,7 @@
   "notes": [
     "GitHub is source repository",
     "Use Vercel deployment URL on iPhone",
-    "GitHub Pages remains interface-only fallback"
+    "GitHub Pages remains interface-only fallback",
+    "Rating mechanics synced with Android phone v0.48 while preserving iPhone/PWA settings"
   ]
 }
