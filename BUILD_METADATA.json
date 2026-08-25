@@ -1,5 +1,5 @@
 {
-  "version": "0.34",
+  "version": "0.35",
   "target": "iPhone / Safari / PWA / Vercel",
   "based_on": "MGUU Web v0.33",
   "backend": "Vercel Node.js Function: api/backend.mjs",

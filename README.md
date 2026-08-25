@@ -1,4 +1,4 @@
-# МГУУ Web v0.34 — iPhone / Vercel
+# МГУУ Web v0.35 — iPhone / Vercel
 
 Веб/PWA-версия расписания МГУУ для iPhone. Эта сборка перенесла серверные маршруты расписания, рейтинга и СДО в Vercel Node.js Function.
 

@@ -1,4 +1,11 @@
-МГУУ Web v0.34 — iPhone / Vercel
+МГУУ Web v0.35 — iPhone/Vercel
+
+- Исправлен 403 при загрузке рейтинга через Vercel.
+- Прокси портала теперь использует браузерный User-Agent и корректный Referer для rating.php, personalrating.php и detailed.php.
+- Если personalrating.php или detailed.php отвечает 403, прокси автоматически воспроизводит цепочку перехода через страницу рейтинга, сохраняет cookies портала и повторяет запрос.
+- Механика и интерфейс iPhone v0.34 не изменены.
+
+МГУУ Web v0.35 — iPhone / Vercel
 
 - основана на iPhone/Web v0.33;
 - сохранены все прежние iPhone/Safari/PWA настройки, внешний вид, СДО и уведомления;

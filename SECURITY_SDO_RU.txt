@@ -1,4 +1,4 @@
-БЕЗОПАСНОСТЬ СДО — MGUU Web v0.34 / Vercel
+БЕЗОПАСНОСТЬ СДО — MGUU Web v0.35 / Vercel
 
 - Пароль СДО не записывается в localStorage, файлы или GitHub.
 - Vercel Function передаёт логин/пароль официальному online.mguu.ru только для получения Moodle-токена.
