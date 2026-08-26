@@ -1,4 +1,4 @@
-МГУУ Web v0.38 — iPhone / Vercel
+МГУУ Web v0.39 — iPhone / Vercel
 
 ЭТОТ АРХИВ ПОДГОТОВЛЕН ДЛЯ VERCEL.
 
@@ -18,4 +18,4 @@
 
 Важно: пароль СДО не сохраняется. Он используется серверной функцией только для получения Moodle-токена.
 
-Примечание v0.38: в vercel.json нет ручного блока functions; Vercel автоматически обнаруживает api/backend.mjs.
+Примечание v0.39: в vercel.json нет ручного блока functions; Vercel автоматически обнаруживает api/backend.mjs.

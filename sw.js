@@ -1,5 +1,5 @@
-const CACHE='mguu-web-v038-vercel';
-const BUILD='038';
+const CACHE='mguu-web-v039-vercel';
+const BUILD='039';
 const BASE=new URL('./',self.location.href);
 const asset=p=>new URL(p,BASE).href;
 const SHELL=[
@@ -50,7 +50,7 @@ self.addEventListener('fetch',event=>{
     return;
   }
 
-  // Always revalidate the app shell/code. This is the key v0.38 delivery rule: an old
+  // Always revalidate the app shell/code. This is the key v0.39 delivery rule: an old
   // iPhone PWA can no longer keep serving app.js from a previous release.
   if(event.request.mode==='navigate'){
     event.respondWith(networkFirst(event.request,offlineIndex));
