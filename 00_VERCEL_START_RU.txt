@@ -1,4 +1,4 @@
-МГУУ Web v0.37 — iPhone / Vercel
+МГУУ Web v0.38 — iPhone / Vercel
 
 ЭТОТ АРХИВ ПОДГОТОВЛЕН ДЛЯ VERCEL.
 
@@ -12,10 +12,10 @@
 8. После первого Deploy откройте Project → Settings → Environment Variables.
 9. Создайте переменную MGUU_SESSION_SECRET со случайной длинной строкой (не публикуйте её в GitHub). Отметьте Production и Preview.
 10. Сделайте Redeploy.
-11. Проверьте адрес https://ВАШ-ПРОЕКТ.vercel.app/api/health — должен вернуться JSON с version 0.37 и sessionSecretConfigured true.
+11. Проверьте адрес https://ВАШ-ПРОЕКТ.vercel.app/api/health — должен вернуться JSON с version 0.38 и sessionSecretConfigured true.
 12. Откройте основной адрес Vercel на iPhone в Safari.
 13. Safari → Поделиться → На экран Домой → Открывать как веб-приложение.
 
 Важно: пароль СДО не сохраняется. Он используется серверной функцией только для получения Moodle-токена.
 
-Примечание v0.37: в vercel.json нет ручного блока functions; Vercel автоматически обнаруживает api/backend.mjs.
+Примечание v0.38: в vercel.json нет ручного блока functions; Vercel автоматически обнаруживает api/backend.mjs.

@@ -7,6 +7,10 @@
       "destination": "/api/backend?route=api/:path*"
     },
     {
+      "source": "/student/:path*",
+      "destination": "/api/backend?route=portal/student/:path*"
+    },
+    {
       "source": "/portal/:path*",
       "destination": "/api/backend?route=portal/:path*"
     }

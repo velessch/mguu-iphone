@@ -1,5 +1,5 @@
 {
-  "version": "0.37",
+  "version": "0.38",
   "target": "iPhone / Safari / PWA / Vercel",
   "based_on": "MGUU Web v0.33",
   "backend": "Vercel Node.js Function: api/backend.mjs",
@@ -17,8 +17,10 @@
     "GitHub is source repository",
     "Use Vercel deployment URL on iPhone",
     "GitHub Pages remains interface-only fallback",
-    "Rating mechanics remain synced with Android phone v0.48; v0.37 changes only PWA update/cache delivery",
-    "Legacy mguu-web-* CacheStorage entries are purged without touching localStorage user settings or saved rating data",
-    "app.js/index/manifest use network-first delivery and the release uses versioned URLs to prevent stale iPhone PWA code"
+    "Rating UI/logic remains synced with Android phone v0.48",
+    "v0.38 separates canonical portal URLs from Vercel transport URLs: /student/... is resolved as portal.mguu.ru/student/... and then fetched through /portal/...",
+    "Saved rating book URLs, period/cache references, notification book URLs and detailed.php references are migrated to canonical portal URLs without clearing localStorage",
+    "vercel.json includes a compatibility /student/:path* rewrite to the portal backend so legacy relative links cannot fall through to Vercel 403",
+    "PWA cache/update protections from v0.37 remain enabled"
   ]
 }

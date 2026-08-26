@@ -1,10 +1,12 @@
 (function(){
 'use strict';
-if(window.__mguuWebV037){return;}
-window.__mguuWebV037=true;
+if(window.__mguuWebV038){return;}
+window.__mguuWebV038=true;
 
-const APP_VERSION='0.37 Web · Vercel';
+const APP_VERSION='0.38 Web · Vercel';
 const DEFAULT_GROUP={id:'000000230',name:'24ГМУ-СКР11.1'};
+const PORTAL_ORIGIN='https://portal.mguu.ru';
+const PORTAL_RATING_URL=PORTAL_ORIGIN+'/student/rating.php';
 const APP_ROOT=new URL('./',window.location.href);
 const IS_GITHUB_PAGES=/\.github\.io$/i.test(window.location.hostname);
 function localBackendUrl(path){
@@ -13,13 +15,39 @@ function localBackendUrl(path){
   return new URL('/'+path,window.location.origin).href;
 }
 const BASE_URL=localBackendUrl('portal/student/scheduler1.php');
-const RATING_URL=localBackendUrl('portal/student/rating.php');
+// Keep portal URLs canonical in application state, exactly like Android.
+// Only the network transport is rewritten to /portal/... for Vercel.
+const RATING_URL=PORTAL_RATING_URL;
+function normalizePortalSourceUrl(value,fallback){
+  try{
+    let raw=String(value||'').trim(),base=String(fallback||PORTAL_RATING_URL);
+    let u;
+    // Portal HTML commonly returns root-relative /student/... links. Resolve
+    // them against portal.mguu.ru, never against the Vercel application origin.
+    if(/^\/?student\//i.test(raw))u=new URL('/'+raw.replace(/^\/+/,''),PORTAL_ORIGIN);
+    else u=new URL(raw||base,base);
+    if(u.origin===window.location.origin&&/^\/portal\/student\//i.test(u.pathname)){
+      u=new URL(PORTAL_ORIGIN+u.pathname.slice('/portal'.length)+u.search+u.hash);
+    }else if(u.origin===window.location.origin&&/^\/student\//i.test(u.pathname)){
+      u=new URL(PORTAL_ORIGIN+u.pathname+u.search+u.hash);
+    }
+    if(u.origin===PORTAL_ORIGIN){
+      u.searchParams.delete('__mguu_groupid');
+      u.searchParams.delete('__mguu_groupname');
+    }
+    return u.href;
+  }catch(e){return String(value||'');}
+}
 function toPortalProxyUrl(value){
   try{
-    let u=new URL(value,window.location.href),proxy=null;
-    if(u.hostname==='portal.mguu.ru')proxy=new URL(localBackendUrl('portal'+u.pathname+u.search));
-    else if(u.origin===window.location.origin&&/^\/portal\/student\//i.test(u.pathname))proxy=new URL(u.href);
-    else return u.href;
+    let source=normalizePortalSourceUrl(value,PORTAL_RATING_URL),u=new URL(source,PORTAL_RATING_URL),proxy=null;
+    if(u.origin===PORTAL_ORIGIN&&/^\/student\//i.test(u.pathname)){
+      proxy=new URL(localBackendUrl('portal'+u.pathname+u.search));
+    }else{
+      let local=new URL(value,window.location.href);
+      if(local.origin===window.location.origin&&/^\/portal\/student\//i.test(local.pathname))proxy=new URL(local.href);
+      else return local.href;
+    }
     // The Vercel proxy needs the same group context that a real portal click
     // has. These internal parameters are stripped by backend.mjs before the
     // request is sent to portal.mguu.ru.
@@ -121,6 +149,99 @@ function fmtShort(d){return pad(d.getDate())+'.'+pad(d.getMonth()+1)+'.'+d.getFu
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
 function readJson(k,f){try{let v=localStorage.getItem(k);return v?JSON.parse(v):f;}catch(e){return f;}}
 function writeJson(k,v){try{localStorage.setItem(k,JSON.stringify(v));}catch(e){}}
+
+const K_PORTAL_URL_MIGRATION_V038='mguu_v038_portal_urls_migrated';
+function normalizeRatingBookRecord(book){
+  if(!book||typeof book!=='object')return book;
+  let out=Object.assign({},book),url=String(out.url||'').trim();
+  if(url)out.url=normalizePortalSourceUrl(url,RATING_URL);
+  return out;
+}
+function normalizeRatingDataPortalUrls(data){
+  if(!data||typeof data!=='object')return data;
+  if(data.sourceUrl)data.sourceUrl=normalizePortalSourceUrl(data.sourceUrl,RATING_URL);
+  if(Array.isArray(data.periodCatalog))data.periodCatalog.forEach(function(x){if(x&&x.url)x.url=normalizePortalSourceUrl(x.url,RATING_URL);});
+  if(data.periodOptions&&typeof data.periodOptions==='object'){
+    ['years','semesters'].forEach(function(kind){(data.periodOptions[kind]||[]).forEach(function(x){if(x&&x.url)x.url=normalizePortalSourceUrl(x.url,RATING_URL);});});
+  }
+  let subjects=Array.isArray(data.subjects)?data.subjects:[];
+  subjects.forEach(function(item){
+    if(!item||!item.detailUrl)return;
+    let oldUrl=String(item.detailUrl||''),newUrl=normalizePortalSourceUrl(oldUrl,RATING_URL);
+    if(newUrl&&newUrl!==oldUrl){
+      let oldCache=readJson(K_RATING_DETAIL_CACHE_BASE+'_'+hash(oldUrl),null);
+      if(oldCache&&!readJson(K_RATING_DETAIL_CACHE_BASE+'_'+hash(newUrl),null))writeJson(K_RATING_DETAIL_CACHE_BASE+'_'+hash(newUrl),oldCache);
+      item.detailUrl=newUrl;
+    }
+  });
+  return data;
+}
+function migrateRatingPortalUrlsV038(){
+  try{
+    if(localStorage.getItem(K_PORTAL_URL_MIGRATION_V038)==='1')return;
+    let keys=[];for(let i=0;i<localStorage.length;i++)keys.push(localStorage.key(i));
+    let maps=[];
+    function remember(groupId,oldUrl,newUrl){
+      oldUrl=String(oldUrl||'');newUrl=String(newUrl||'');
+      if(!groupId||!oldUrl||!newUrl||oldUrl===newUrl)return;
+      if(!maps.some(function(m){return m.groupId===groupId&&m.oldUrl===oldUrl&&m.newUrl===newUrl;}))maps.push({groupId:String(groupId),oldUrl:oldUrl,newUrl:newUrl});
+    }
+    keys.forEach(function(key){
+      if(!key)return;
+      let bookPrefix=K_RATING_BOOK_BASE+'_',booksPrefix=K_RATING_BOOKS_BASE+'_';
+      if(key.indexOf(bookPrefix)===0){
+        let groupId=key.slice(bookPrefix.length),book=readJson(key,null);
+        if(book&&book.url){
+          let oldUrl=String(book.url),fixed=normalizeRatingBookRecord(book);
+          remember(groupId,oldUrl,fixed.url);writeJson(key,fixed);
+        }
+      }else if(key.indexOf(booksPrefix)===0){
+        let groupId=key.slice(booksPrefix.length),payload=readJson(key,null);
+        if(payload&&Array.isArray(payload.books)){
+          payload.books=payload.books.map(function(book){
+            if(!book||!book.url)return book;
+            let oldUrl=String(book.url),fixed=normalizeRatingBookRecord(book);remember(groupId,oldUrl,fixed.url);return fixed;
+          });
+          writeJson(key,payload);
+        }
+      }
+    });
+    maps.forEach(function(m){
+      let oldPeriodKey=K_RATING_PERIOD_BASE+'_'+m.groupId+'_'+hash(m.oldUrl),newPeriodKey=K_RATING_PERIOD_BASE+'_'+m.groupId+'_'+hash(m.newUrl);
+      let period=readJson(oldPeriodKey,null);if(period&&!readJson(newPeriodKey,null))writeJson(newPeriodKey,period);
+    });
+    keys.forEach(function(key){
+      if(!key||key.indexOf(K_RATING_CACHE_BASE+'_')!==0)return;
+      let data=readJson(key,null);if(!data)return;
+      let oldSource=String(data.sourceUrl||''),oldInfo=oldSource?ratingPersonalUrlInfo(oldSource):null;
+      normalizeRatingDataPortalUrls(data);writeJson(key,data);
+      let rest=key.slice((K_RATING_CACHE_BASE+'_').length),groupId=rest.split('_')[0],period=normalizeRatingPeriod(data.period||{});
+      let mapping=maps.find(function(m){
+        if(m.groupId!==groupId)return false;
+        if(oldInfo){
+          let mi=ratingPersonalUrlInfo(m.oldUrl)||ratingPersonalUrlInfo(m.newUrl);
+          return !!(mi&&mi.userid===oldInfo.userid);
+        }
+        return false;
+      });
+      if(mapping&&(period.year||period.semester)){
+        let newKey=K_RATING_CACHE_BASE+'_'+groupId+'_'+hash(mapping.newUrl+'|'+period.year+'|'+period.semester);
+        writeJson(newKey,data);
+      }
+    });
+    let notices=readJson(K_NOTIFICATIONS,[]);
+    if(Array.isArray(notices)){
+      notices.forEach(function(n){
+        if(!n)return;
+        if(n.bookUrl)n.bookUrl=normalizePortalSourceUrl(n.bookUrl,RATING_URL);
+        if(n.extra&&n.extra.bookUrl)n.extra.bookUrl=normalizePortalSourceUrl(n.extra.bookUrl,RATING_URL);
+      });
+      writeJson(K_NOTIFICATIONS,notices);
+    }
+    try{localStorage.removeItem(K_NOTIFY_RATING_SCOPE);}catch(e){}
+    localStorage.setItem(K_PORTAL_URL_MIGRATION_V038,'1');
+  }catch(e){}
+}
 function dismissSplash(){
   if(splashDismissed)return;
   let elapsed=Date.now()-splashStartedAt,delay=Math.max(0,900-elapsed);
@@ -226,7 +347,7 @@ function openScheduleNotification(n){
 }
 function openRatingNotification(n){
   if(n&&n.groupId){ratingGroup={id:String(n.groupId),name:n.groupName||ratingGroup.name};writeJson(K_RATING_SELECTED_GROUP,ratingGroup);}
-  if(n&&n.bookUrl){selectedBook={label:n.book||'Зачётная книжка',url:n.bookUrl};writeJson(ratingBookKey(),selectedBook);}else{selectedBook=readJson(ratingBookKey(),selectedBook);}
+  if(n&&n.bookUrl){selectedBook={label:n.book||'Зачётная книжка',url:normalizePortalSourceUrl(n.bookUrl,RATING_URL)};writeJson(ratingBookKey(),selectedBook);}else{selectedBook=readJson(ratingBookKey(),selectedBook);}
   ratingPeriod=selectedBook?loadStoredRatingPeriod(selectedBook):normalizeRatingPeriod({});
   pendingRatingSubjects=[];pendingRatingMarks=[];
   if(n&&n.extra){
@@ -535,7 +656,7 @@ function normalizeBookLabel(label,url){
   let s=cleanLine(label||'');
   if(s&&s.length<120)return s;
   try{
-    let u=new URL(url,RATING_URL),vals=[];
+    let u=new URL(normalizePortalSourceUrl(url,RATING_URL),RATING_URL),vals=[];
     u.searchParams.forEach(function(v,k){if(k!=='groupid'&&k!=='groupname'&&v)vals.push(v);});
     if(vals.length)return vals.join(' · ');
   }catch(e){}
@@ -545,7 +666,7 @@ function parseRatingBooksDoc(doc,group){
   let books=[],seen=new Set(),base=ratingGroupUrl(group);
   function add(label,url){
     try{
-      let u=new URL(url,base);
+      let u=new URL(normalizePortalSourceUrl(url,base),RATING_URL);
       if(!/^https?:$/.test(u.protocol))return;
       let gid=u.searchParams.get('groupid');if(gid&&gid!==group.id)return;
       let params=[];u.searchParams.forEach(function(v,k){if(k!=='groupid'&&k!=='groupname'&&v)params.push(k+'='+v);});
@@ -567,7 +688,7 @@ function parseRatingBooksDoc(doc,group){
         if(!val||!lbl||/выберите/i.test(lbl))return;
         try{
           if(/^https?:|^\//i.test(val)){add(lbl,val);return;}
-          let u=new URL(action,base);u.searchParams.set('groupid',group.id);u.searchParams.set('groupname',group.name);u.searchParams.set(pname,val);add(lbl,u.href);
+          let u=new URL(normalizePortalSourceUrl(action,base),RATING_URL);u.searchParams.set('groupid',group.id);u.searchParams.set('groupname',group.name);u.searchParams.set(pname,val);add(lbl,u.href);
         }catch(e){}
       });
     });
@@ -771,7 +892,7 @@ function ratingDocMatchesBook(doc,book){
 function ratingCatalogLinkCandidates(doc,sourceUrl,book){
   let out=[],seen=new Set(),baseBook='';try{baseBook=new URL(book.url,sourceUrl).href;}catch(e){baseBook=book.url||'';}
   function add(raw){
-    if(!raw)return;try{let u=new URL(raw,sourceUrl);if(u.origin!==location.origin||!/\/student\/rating\.php$/i.test(u.pathname))return;let href=u.href;if(seen.has(href))return;seen.add(href);out.push(href);}catch(e){}
+    if(!raw)return;try{let u=new URL(raw,sourceUrl);if(u.origin!==PORTAL_ORIGIN||!/\/student\/rating\.php$/i.test(u.pathname))return;let href=u.href;if(seen.has(href))return;seen.add(href);out.push(href);}catch(e){}
   }
   Array.from(doc.querySelectorAll('a[href],a[data-href],[data-url],a[onclick],button[onclick]')).forEach(function(a){
     let raw=a.getAttribute('href')||a.getAttribute('data-href')||a.getAttribute('data-url')||ratingExtractJsUrl(a,sourceUrl)||'',label=cleanLine(a.textContent||a.getAttribute('aria-label')||a.getAttribute('title')||'');
@@ -989,7 +1110,7 @@ function fetchRenderedRatingResponse(url){
             (primed.semesters||[]).forEach(function(o){let x=d.createElement('span');x.setAttribute('data-mguu-period-kind','semester');x.setAttribute('data-value',o.value||o.label);x.textContent=o.label||o.value;store.appendChild(x);});
             d.body.appendChild(store);
           }
-          let finalUrl=url;try{finalUrl=frame.contentWindow.location.href||url;}catch(e){}
+          let finalUrl=normalizePortalSourceUrl(url,PORTAL_RATING_URL);try{finalUrl=normalizePortalSourceUrl(frame.contentWindow.location.href||url,finalUrl);}catch(e){}
           let html='<!doctype html>'+d.documentElement.outerHTML;
           finish(null,{doc:new DOMParser().parseFromString(html,'text/html'),url:finalUrl,rendered:true});
         }catch(e){finish(e);}
@@ -997,7 +1118,7 @@ function fetchRenderedRatingResponse(url){
     };
     frame.onerror=function(){finish(new Error('Не удалось открыть страницу рейтинга'));};
     hardTimer=setTimeout(function(){finish(new Error('Страница рейтинга загружается слишком долго'));},6500);
-    try{document.body.appendChild(frame);frame.src=new URL(url,location.href).href;}catch(e){finish(e);}
+    try{document.body.appendChild(frame);frame.src=toPortalProxyUrl(normalizePortalSourceUrl(url,PORTAL_RATING_URL));}catch(e){finish(e);}
   });
 }
 function fetchRenderedRatingSelection(url,yearChoice,semesterChoice){
@@ -1047,26 +1168,25 @@ function fetchRenderedRatingSelection(url,yearChoice,semesterChoice){
           (primed.years||[]).forEach(function(o){let x=d.createElement('span');x.setAttribute('data-mguu-period-kind','year');x.setAttribute('data-value',o.value||o.label);x.textContent=o.label||o.value;store.appendChild(x);});
           (primed.semesters||[]).forEach(function(o){let x=d.createElement('span');x.setAttribute('data-mguu-period-kind','semester');x.setAttribute('data-value',o.value||o.label);x.textContent=o.label||o.value;store.appendChild(x);});d.body.appendChild(store);
         }
-        let finalUrl=url;try{finalUrl=frame.contentWindow.location.href||url;}catch(e){}
+        let finalUrl=normalizePortalSourceUrl(url,PORTAL_RATING_URL);try{finalUrl=normalizePortalSourceUrl(frame.contentWindow.location.href||url,finalUrl);}catch(e){}
         let html='<!doctype html>'+d.documentElement.outerHTML;finish(null,{doc:new DOMParser().parseFromString(html,'text/html'),url:finalUrl,rendered:true});
       }catch(e){finish(e);}
     }
     frame.setAttribute('aria-hidden','true');frame.setAttribute('sandbox','allow-scripts allow-forms allow-same-origin');frame.style.cssText='position:fixed;left:-10000px;top:0;width:390px;height:844px;opacity:0;pointer-events:none;border:0;z-index:-1';
     frame.onload=function(){if(!started)setTimeout(run,120);};frame.onerror=function(){finish(new Error('Не удалось открыть страницу рейтинга'));};hardTimer=setTimeout(function(){finish(new Error('Страница рейтинга загружается слишком долго'));},11000);
-    try{document.body.appendChild(frame);frame.src=new URL(url,location.href).href;}catch(e){finish(e);}
+    try{document.body.appendChild(frame);frame.src=toPortalProxyUrl(normalizePortalSourceUrl(url,PORTAL_RATING_URL));}catch(e){finish(e);}
   });
 }
 
 async function fetchRatingResponse(url,options){
-  let opts=options||{};
-  // v0.41: rating data must come from the untouched portal response. A hidden
-  // rendered iframe is useful only as an optional period-control probe: on
-  // some Android WebView versions an iframe can be affected by the app shell
-  // lifecycle and then no longer contains the original rating table.
-  let r=await fetch(toPortalProxyUrl(url),Object.assign({cache:'no-store',credentials:'same-origin'},opts));
+  let opts=options||{},sourceUrl=normalizePortalSourceUrl(url,PORTAL_RATING_URL),transportUrl=toPortalProxyUrl(sourceUrl);
+  // v0.38: sourceUrl always remains a canonical portal.mguu.ru URL, matching
+  // Android URL resolution. Vercel /portal/... is transport only and is never
+  // used as the base for relative hrefs returned by the portal.
+  let r=await fetch(transportUrl,Object.assign({cache:'no-store',credentials:'same-origin'},opts));
   let html=await r.text();
   if(!r.ok){let stage=r.headers.get('x-mguu-portal-stage')||'';throw new Error('Рейтинг вернул '+r.status+(stage?' · '+stage:''));}
-  return {doc:new DOMParser().parseFromString(html,'text/html'),url:r.url||url,rendered:false};
+  return {doc:new DOMParser().parseFromString(html,'text/html'),url:sourceUrl,transportUrl:r.url||transportUrl,rendered:false};
 }
 async function fetchRatingPeriodOptionsFast(book){
   // Same transport principle as the schedule: one direct portal request,
@@ -1082,7 +1202,7 @@ async function fetchRatingPeriodOptionsFast(book){
 
 function ratingPersonalUrlInfo(raw){
   try{
-    let u=new URL(raw,RATING_URL);if(!/\/student\/personalrating\.php$/i.test(u.pathname))return null;
+    let u=new URL(normalizePortalSourceUrl(raw,RATING_URL),RATING_URL);if(u.origin!==PORTAL_ORIGIN||!/\/student\/personalrating\.php$/i.test(u.pathname))return null;
     let userid=String(u.searchParams.get('userid')||'').trim(),year=String(u.searchParams.get('year')||'').trim(),sem=String(u.searchParams.get('sem')||'').trim();
     if(!userid)return null;return {url:u,userid:userid,year:year,sem:sem};
   }catch(e){return null;}
@@ -1123,7 +1243,7 @@ async function discoverPersonalRatingPeriodCatalog(book,firstDoc,firstUrl){
 
 async function discoverRatingPeriodCatalog(book,firstDoc,firstUrl){
   let queue=[],queued=new Set(),visited=new Set(),entries=[],entrySeen=new Set(),maxPages=28;
-  function enqueue(raw){if(!raw)return;try{let u=new URL(raw,firstUrl||book.url);if(u.origin!==location.origin||!/\/student\/rating\.php$/i.test(u.pathname))return;let href=u.href;if(queued.has(href)||visited.has(href))return;queued.add(href);queue.push(href);}catch(e){}}
+  function enqueue(raw){if(!raw)return;try{let u=new URL(raw,firstUrl||book.url);if(u.origin!==PORTAL_ORIGIN||!/\/student\/rating\.php$/i.test(u.pathname))return;let href=u.href;if(queued.has(href)||visited.has(href))return;queued.add(href);queue.push(href);}catch(e){}}
   function accept(doc,url,force){
     let p=ratingPeriodFromVisibleDoc(doc);if(!p.year||!p.semester)return;
     if(!force&&!ratingDocMatchesBook(doc,book))return;
@@ -1222,7 +1342,7 @@ async function openRatingBooks(){
   try{books=await fetchRatingBooks(ratingGroup);ratingBooks=books;let c=document.getElementById('bookCount'),l=document.getElementById('bookList');if(!c||!l)return;c.textContent='Зачётных книжек: '+books.length;l.innerHTML=bookListHtml(books,'');bindBookItems(books);}catch(err){if(!books||!books.length){let l=document.getElementById('bookList');if(l)l.innerHTML='<div class="emptySmall">Не удалось получить список.<br><span class="muted">'+esc(err.message||'Проверьте интернет')+'</span></div>';}}
 }
 function selectRatingBook(label,url){
-  if(!url)return;selectedBook={label:label||'Зачётная книжка',url:url};writeJson(ratingBookKey(),selectedBook);ratingLastBackgroundAt=0;ratingPeriod=loadStoredRatingPeriod(selectedBook);ratingPeriodOptions={years:[],semesters:[]};ratingPeriodCatalog=[];ratingData=null;closeModal();updateBookButton();updateRatingPeriodControls();loadRating(false);
+  if(!url)return;url=normalizePortalSourceUrl(url,RATING_URL);selectedBook={label:label||'Зачётная книжка',url:url};writeJson(ratingBookKey(),selectedBook);ratingLastBackgroundAt=0;ratingPeriod=loadStoredRatingPeriod(selectedBook);ratingPeriodOptions={years:[],semesters:[]};ratingPeriodCatalog=[];ratingData=null;closeModal();updateBookButton();updateRatingPeriodControls();loadRating(false);
 }
 function updateBookButton(){let el=document.getElementById('bookName');if(el)el.textContent=selectedBook?selectedBook.label:'Выберите зачётную книжку';}
 function ratingPeriodButtonLabel(kind){
@@ -1372,12 +1492,12 @@ function ratingLeafTextNodes(doc){
   });return list;
 }
 function ratingSubjectsFromPersonalDom(doc,sourceUrl){
-  let anchors=Array.from(doc.querySelectorAll('a[href]')).filter(function(a){try{return /\/student\/detailed\.php$/i.test(new URL(a.getAttribute('href')||'',sourceUrl).pathname);}catch(e){return false;}});
+  let anchors=Array.from(doc.querySelectorAll('a[href]')).filter(function(a){try{return /\/student\/detailed\.php$/i.test(new URL(normalizePortalSourceUrl(a.getAttribute('href')||'',sourceUrl),RATING_URL).pathname);}catch(e){return false;}});
   if(!anchors.length)return [];
   let metricLabels=ratingSummaryMetricLabels(doc),leaves=ratingLeafTextNodes(doc),anchorIndex=new Map(),anchorSet=new Set(anchors);leaves.forEach(function(x,i){let a=null;try{a=x.el&&x.el.tagName==='A'?x.el:(x.el&&x.el.closest?x.el.closest('a[href]'):null);}catch(e){}if(a&&anchorSet.has(a)&&!anchorIndex.has(a))anchorIndex.set(a,i);});
   let result=[],seen=new Set();
   anchors.forEach(function(a,ai){
-    let rawLabel=cleanLine(a.textContent||'');if(!rawLabel)return;let href='';try{href=new URL(a.getAttribute('href')||'',sourceUrl).href;}catch(e){return;}
+    let rawLabel=cleanLine(a.textContent||'');if(!rawLabel)return;let href='';try{href=normalizePortalSourceUrl(a.getAttribute('href')||'',sourceUrl);}catch(e){return;}
     let discipline=rawLabel;try{let q=new URL(href).searchParams.get('discipline');if(q)discipline=cleanLine(q);}catch(e){}
     let control='',subject=discipline,cm=subject.match(/(?:[,;]\s*|\s+)(зач[её]т(?:\s+с\s+оценкой)?|экзамен|дифференцированн[а-яё]*\s+зач[её]т)\s*$/i);if(cm){control=cleanLine(cm[1]);subject=cleanLine(subject.slice(0,cm.index));}
     let key=normalizeSubject(subject);if(!subject||subject.length<3||seen.has(key))return;
@@ -2068,7 +2188,7 @@ const CSS=`
 #app[data-theme=dark] .sdoProfile{background:linear-gradient(135deg,#29334b,#3a2f4c);color:#eef2fa}#app[data-theme=dark] .sdoAvatar{background:#1b2029;color:#9dacff}#app[data-theme=dark] .sdoLogout{background:rgba(28,32,42,.68);color:#dce3f0}#app[data-theme=dark] .sdoBlock,#app[data-theme=dark] .sdoLoginCard{background:#1c2028;color:#edf1f7}#app[data-theme=dark] .sdoDeadline,#app[data-theme=dark] .sdoCourseCard,#app[data-theme=dark] .sdoGradeCard{background:#252a34;color:#e7ebf3}#app[data-theme=dark] .sdoCourseIcon{background:#32394c;color:#aebcff}#app[data-theme=dark] .sdoLoginForm input{background:#242933;border-color:#3b424f;color:#f1f4f9}#app[data-theme=dark] .sdoPrivacy{background:#252b36;color:#b7c0cf}#app[data-theme=dark] .sdoPrivacy b{color:#e2e7ef}#app[data-theme=dark] .sdoCourseSection{border-color:#363d49}#app[data-theme=dark] .sdoCourseSection button,#app[data-theme=dark] .sdoCourseGrade{color:#e8edf5;border-color:#323845}
 html.samsung-fold .top{padding-top:max(38px,calc(env(safe-area-inset-top,0px) + 14px))}html.android-edge:not(.samsung-fold) .top{padding-top:max(28px,calc(env(safe-area-inset-top,0px) + 12px))}@media(max-width:390px) and (min-height:700px){.top{padding-top:max(30px,calc(env(safe-area-inset-top,0px) + 12px))}}@media(max-width:360px){.title{font-size:23px}.lesson{grid-template-columns:42px 65px 1fr}.info h3{font-size:15px}.top{padding-left:12px;padding-right:12px}.tabs,.changeBanner{margin-left:12px;margin-right:12px}main{padding-left:11px;padding-right:11px}}
 .ratingControls{display:flex;flex-direction:column;gap:10px;padding:3px 16px 13px}.ratingPeriodControls{display:grid;grid-template-columns:1fr 1fr;gap:9px}.ratingPeriodButton{position:relative;display:grid;grid-template-columns:minmax(0,1fr) 18px;align-items:center;column-gap:8px;min-width:0;min-height:54px;padding:10px 12px;border:0;border-radius:14px;background:#e9edf5;color:#334155;text-align:left;box-shadow:0 2px 7px rgba(45,57,82,.05)}.ratingPeriodButton>strong{grid-column:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:800}.ratingPeriodButton .groupChevron{grid-column:2;width:17px;height:17px}.ratingPeriodButton:active{transform:scale(.985);filter:brightness(.97)}.ratingPeriodPicker{display:flex;flex-direction:column;gap:7px}.ratingPeriodNativeState{min-height:190px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:20px 10px}.ratingPeriodNativeState .emptyTitle{margin-top:10px}.ratingPeriodNativeIcon{width:42px;height:42px;border-radius:14px;display:flex;align-items:center;justify-content:center;background:#e9edf8;color:#5b6fe8;font-size:22px;font-weight:900}.ratingPeriodSpinner{width:34px;height:34px;border-radius:50%;border:3px solid rgba(91,111,232,.18);border-top-color:#5b6fe8;animation:spin .8s linear infinite}#app[data-theme=dark] .ratingPeriodNativeIcon{background:#30374a;color:#c9d2ff}#app[data-theme=dark] .ratingPeriodSpinner{border-color:rgba(201,210,255,.18);border-top-color:#c9d2ff}.ratingPeriodItem{width:100%;display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:48px;padding:11px 13px;border:0;border-radius:14px;background:#f1f3f8;color:#2c3749;text-align:left;font-size:13px;font-weight:780}.ratingPeriodItem.current{background:#e4e9ff;color:#4051ad}.ratingDetails{background:rgba(255,255,255,.24)}#app[data-theme=dark] .ratingPeriodButton{background:#242832;color:#e8edf5}#app[data-theme=dark] .ratingPeriodItem{background:#242933;color:#edf1f7}#app[data-theme=dark] .ratingPeriodItem.current{background:#313a5a;color:#c9d2ff}@media(max-width:370px){.ratingPeriodControls{grid-template-columns:1fr}.ratingCardHead{grid-template-columns:minmax(0,1fr) auto 22px}.ratingTotal b{font-size:19px}}
-/* iPhone / Safari / Home Screen — v0.37 / Vercel */
+/* iPhone / Safari / Home Screen — v0.38 / Vercel */
 @supports (-webkit-touch-callout:none){html,body{overscroll-behavior:none;-webkit-text-size-adjust:100%}#app{min-height:100dvh}.top{padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}.tabs{margin-left:max(16px,env(safe-area-inset-left,0px));margin-right:max(16px,env(safe-area-inset-right,0px))}.navrow{padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}.changeBanner{margin-left:max(16px,env(safe-area-inset-left,0px));margin-right:max(16px,env(safe-area-inset-right,0px))}main,.sdoDashboard{padding-left:max(14px,env(safe-area-inset-left,0px));padding-right:max(14px,env(safe-area-inset-right,0px))}footer{padding-left:max(17px,env(safe-area-inset-left,0px));padding-right:max(17px,env(safe-area-inset-right,0px));padding-bottom:max(12px,env(safe-area-inset-bottom,0px))}.modalBox{padding-bottom:max(16px,calc(env(safe-area-inset-bottom,0px) + 10px))}.notificationPanel{padding-left:max(14px,env(safe-area-inset-left,0px));padding-right:max(14px,env(safe-area-inset-right,0px))}.drawer{padding-left:max(14px,env(safe-area-inset-left,0px))}input,select,textarea{font-size:16px!important}}
 `;
 
@@ -2079,6 +2199,7 @@ document.addEventListener('click',function(ev){
 
 let initialEvents=[];try{initialEvents=parseScheduleDoc(document);}catch(e){}
 installShell();
+migrateRatingPortalUrlsV038();
 ratingRepairAllCachedControlPointsV048();
 nativeNotificationAction('ready');
 let cache=readGroupJson(K_CACHE_BASE,null);if(cache&&cache.events&&cache.events.length){allEvents=cache.events;lastRange={start:cache.start,end:cache.end};render();setStatus('Показана сохранённая версия, проверяем обновления...');setTimeout(dismissSplash,1050);}else if(selectedGroup.id===DEFAULT_GROUP.id&&initialEvents.length){allEvents=initialEvents;render();setTimeout(dismissSplash,1050);}
