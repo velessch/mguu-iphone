@@ -3,7 +3,7 @@ import {URL} from "node:url";
 
 export const maxDuration = 60;
 
-const APP_VERSION="0.36";
+const APP_VERSION="0.37";
 const SDO_BASE_URL=new URL(process.env.MGUU_SDO_BASE_URL||"https://online.mguu.ru/");
 const COOKIE_NAME="mguu_sdo_session";
 const COOKIE_AGE=30*24*60*60;

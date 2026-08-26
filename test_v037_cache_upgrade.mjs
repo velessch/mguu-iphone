@@ -1,0 +1,16 @@
+import fs from 'node:fs';
+const index=fs.readFileSync(new URL('./index.html',import.meta.url),'utf8');
+const sw=fs.readFileSync(new URL('./sw.js',import.meta.url),'utf8');
+const app=fs.readFileSync(new URL('./app.js',import.meta.url),'utf8');
+if(!index.includes("BUILD='037'"))throw new Error('index build missing');
+if(!index.includes("key.indexOf('mguu-web-')===0 && key!==CURRENT_CACHE"))throw new Error('legacy cache purge missing');
+if(!index.includes("script.src='./app.js?v='+BUILD"))throw new Error('versioned app loader missing');
+if(!index.includes("register('./sw.js?v='+BUILD,{updateViaCache:'none'})"))throw new Error('no-cache SW registration missing');
+if(index.includes('<script src="./app.js?v=036'))throw new Error('old static v036 app loader remains');
+if(!sw.includes("const CACHE='mguu-web-v037-vercel'"))throw new Error('wrong SW cache');
+if(!sw.includes("rel.startsWith('portal/')||rel.startsWith('api/')"))throw new Error('portal/api network rule missing');
+if(!sw.includes("fetch(event.request,{cache:'no-store'})"))throw new Error('no-store network path missing');
+if(!sw.includes("/^(?:app\\.js|index\\.html|manifest\\.webmanifest|sw\\.js)$/i"))throw new Error('critical asset network-first rule missing');
+if(!app.includes('window.__mguuWebV037=true;'))throw new Error('v037 app marker missing');
+if(!app.includes("const APP_VERSION='0.37 Web · Vercel';"))throw new Error('v037 UI version missing');
+console.log('v0.37 PWA cache upgrade test: OK');
