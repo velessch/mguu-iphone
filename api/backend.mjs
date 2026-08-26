@@ -3,7 +3,7 @@ import {URL} from "node:url";
 
 export const maxDuration = 60;
 
-const APP_VERSION="0.35";
+const APP_VERSION="0.36";
 const SDO_BASE_URL=new URL(process.env.MGUU_SDO_BASE_URL||"https://online.mguu.ru/");
 const COOKIE_NAME="mguu_sdo_session";
 const COOKIE_AGE=30*24*60*60;
@@ -223,19 +223,31 @@ function portalUserAgent(req){
   if(/^Mozilla\/5\.0/i.test(incoming))return incoming.slice(0,500);
   return "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1";
 }
-function portalRefererFor(target){
+function portalGroupUrl(groupId,groupName){
+  const u=new URL("https://portal.mguu.ru/student/rating.php");
+  if(groupId)u.searchParams.set("groupid",String(groupId));
+  if(groupName)u.searchParams.set("groupname",String(groupName));
+  return u;
+}
+function portalRefererFor(target,context){
+  context=context||{};
+  const groupUrl=portalGroupUrl(context.groupId,context.groupName).href;
   if(/\/student\/detailed\.php$/i.test(target.pathname)){
     const parent=new URL("https://portal.mguu.ru/student/personalrating.php");
     for(const key of ["userid","year","sem"]){const value=target.searchParams.get(key);if(value!=null&&value!=="")parent.searchParams.set(key,value);}
     return parent.href;
   }
-  if(/\/student\/personalrating\.php$/i.test(target.pathname))return "https://portal.mguu.ru/student/rating.php";
+  if(/\/student\/personalrating\.php$/i.test(target.pathname))return context.groupId?groupUrl:"https://portal.mguu.ru/student/rating.php";
   return "https://portal.mguu.ru/student/";
 }
 function portalSetCookies(headers){
   if(!headers)return [];
   try{if(typeof headers.getSetCookie==="function")return headers.getSetCookie().filter(Boolean);}catch(e){}
-  const raw=headers.get&&headers.get("set-cookie");return raw?[raw]:[];
+  const raw=headers.get&&headers.get("set-cookie");
+  if(!raw)return [];
+  // Node runtimes that flatten Set-Cookie need a conservative split that does
+  // not break the comma inside an Expires attribute.
+  return String(raw).split(/,(?=\s*[!#$%&'*+.^_`|~0-9A-Za-z-]+=)/g).map(x=>x.trim()).filter(Boolean);
 }
 function portalMergeCookies(base,setCookies){
   const jar=new Map();
@@ -245,48 +257,95 @@ function portalMergeCookies(base,setCookies){
 }
 function portalHeaders(req,target,cookie,referer){
   const h={
-    "accept":"text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "accept-language":String(req&&req.headers&&req.headers["accept-language"]||"ru-RU,ru;q=0.9,en;q=0.7").slice(0,300),
+    "accept":"text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "accept-language":String(req&&req.headers&&req.headers["accept-language"]||"ru-RU,ru;q=0.9,en-US;q=0.7,en;q=0.6").slice(0,300),
     "cache-control":"no-cache",
     "pragma":"no-cache",
     "upgrade-insecure-requests":"1",
+    "sec-fetch-dest":"document",
+    "sec-fetch-mode":"navigate",
+    "sec-fetch-site":"same-origin",
+    "sec-fetch-user":"?1",
     "user-agent":portalUserAgent(req),
-    "referer":referer||portalRefererFor(target)
+    "referer":referer||"https://portal.mguu.ru/student/"
   };
   if(cookie)h.cookie=cookie;
   return h;
 }
-async function portalFetch(target,req,signal,cookie,referer){
-  return await fetch(target,{method:"GET",redirect:"follow",signal,headers:portalHeaders(req,target,cookie,referer)});
+async function portalFetchOnce(target,req,signal,cookie,referer){
+  return await fetch(target,{method:"GET",redirect:"manual",signal,headers:portalHeaders(req,target,cookie,referer)});
 }
-async function portalPrimeAndRetry(target,req,signal){
+async function portalFetchFollow(target,req,signal,cookie,referer,maxRedirects=6){
+  let current=new URL(target),jar=String(cookie||""),ref=referer||"https://portal.mguu.ru/student/";
+  for(let i=0;i<=maxRedirects;i++){
+    const response=await portalFetchOnce(current,req,signal,jar,ref);
+    jar=portalMergeCookies(jar,portalSetCookies(response.headers));
+    if(response.status>=300&&response.status<400){
+      const location=response.headers.get("location");
+      if(!location)return {response,cookie:jar,finalUrl:current};
+      try{await response.arrayBuffer();}catch(e){}
+      const next=new URL(location,current);
+      // Never follow a portal redirect to a different host.
+      if(next.origin!=="https://portal.mguu.ru")return {response,cookie:jar,finalUrl:current};
+      ref=current.href;current=next;continue;
+    }
+    return {response,cookie:jar,finalUrl:current};
+  }
+  throw Object.assign(new Error("Слишком много перенаправлений портала"),{status:502});
+}
+async function portalPrimeAndRetry(target,req,signal,context){
+  context=context||{};
   let cookie="";
-  const ratingLanding=new URL("https://portal.mguu.ru/student/rating.php");
-  const landing=await portalFetch(ratingLanding,req,signal,cookie,"https://portal.mguu.ru/student/");
-  cookie=portalMergeCookies(cookie,portalSetCookies(landing.headers));
-  try{await landing.arrayBuffer();}catch(e){}
+  // Reproduce the real navigation chain instead of jumping directly to a
+  // student's personal page: Rating -> selected group -> gradebook.
+  const landingUrl=new URL("https://portal.mguu.ru/student/rating.php");
+  let step=await portalFetchFollow(landingUrl,req,signal,cookie,"https://portal.mguu.ru/student/");
+  cookie=step.cookie;
+  try{await step.response.arrayBuffer();}catch(e){}
 
-  let referer="https://portal.mguu.ru/student/rating.php";
+  let groupRef=landingUrl.href;
+  if(context.groupId){
+    const groupUrl=portalGroupUrl(context.groupId,context.groupName);
+    step=await portalFetchFollow(groupUrl,req,signal,cookie,landingUrl.href);
+    cookie=step.cookie;
+    try{await step.response.arrayBuffer();}catch(e){}
+    groupRef=groupUrl.href;
+  }
+
+  let referer=groupRef;
   if(/\/student\/detailed\.php$/i.test(target.pathname)){
     const parent=new URL("https://portal.mguu.ru/student/personalrating.php");
     for(const key of ["userid","year","sem"]){const value=target.searchParams.get(key);if(value!=null&&value!=="")parent.searchParams.set(key,value);}
-    const parentResponse=await portalFetch(parent,req,signal,cookie,"https://portal.mguu.ru/student/rating.php");
-    cookie=portalMergeCookies(cookie,portalSetCookies(parentResponse.headers));
-    try{await parentResponse.arrayBuffer();}catch(e){}
+    step=await portalFetchFollow(parent,req,signal,cookie,groupRef);
+    cookie=step.cookie;
+    try{await step.response.arrayBuffer();}catch(e){}
     referer=parent.href;
   }
-  return await portalFetch(target,req,signal,cookie,referer);
+  return await portalFetchFollow(target,req,signal,cookie,referer);
 }
 async function proxyPortal(req,res,url){
   const portalPath=url.pathname.slice("/portal".length);
   if(!ALLOWED_PORTAL.has(portalPath)){send(res,404,"Недоступный адрес портала");return;}
-  const target=new URL("https://portal.mguu.ru"+portalPath+url.search);
-  const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),25000);
+
+  // These parameters belong only to our proxy. They are deliberately removed
+  // before forwarding the URL to portal.mguu.ru.
+  const context={
+    groupId:String(url.searchParams.get("__mguu_groupid")||""),
+    groupName:String(url.searchParams.get("__mguu_groupname")||"")
+  };
+  const target=new URL("https://portal.mguu.ru"+portalPath);
+  url.searchParams.forEach((value,key)=>{if(!key.startsWith("__mguu_"))target.searchParams.append(key,value);});
+
+  const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),30000);
+  let stage="direct";
   try{
-    let upstream=await portalFetch(target,req,controller.signal,"",portalRefererFor(target));
+    let result=await portalFetchFollow(target,req,controller.signal,"",portalRefererFor(target,context));
+    let upstream=result.response;
     if(upstream.status===403&&(/\/student\/(?:personalrating|detailed)\.php$/i.test(target.pathname))){
       try{await upstream.arrayBuffer();}catch(e){}
-      upstream=await portalPrimeAndRetry(target,req,controller.signal);
+      stage=context.groupId?"group-prime":"landing-prime";
+      result=await portalPrimeAndRetry(target,req,controller.signal,context);
+      upstream=result.response;
     }
     const data=Buffer.from(await upstream.arrayBuffer());
     res.writeHead(upstream.status,{
@@ -294,10 +353,14 @@ async function proxyPortal(req,res,url){
       "cache-control":"no-store, no-cache, must-revalidate",
       "pragma":"no-cache",
       "x-content-type-options":"nosniff",
-      "x-mguu-portal-status":String(upstream.status)
+      "x-mguu-portal-status":String(upstream.status),
+      "x-mguu-portal-stage":stage,
+      "x-mguu-portal-final":String(result.finalUrl&&result.finalUrl.pathname||target.pathname)
     });
     res.end(data);
-  }catch(err){send(res,502,"Портал МГУУ временно недоступен: "+(err&&err.name==="AbortError"?"превышено время ожидания":"ошибка соединения"));}
+  }catch(err){
+    send(res,502,"Портал МГУУ временно недоступен: "+(err&&err.name==="AbortError"?"превышено время ожидания":"ошибка соединения"),"text/plain; charset=utf-8",{"x-mguu-portal-stage":stage});
+  }
   finally{clearTimeout(timer);}
 }
 async function handleSdo(req,res,url){
