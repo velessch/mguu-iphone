@@ -1,9 +1,9 @@
 (function(){
 'use strict';
-if(window.__mguuWebV039){return;}
-window.__mguuWebV039=true;
+if(window.__mguuWebV040){return;}
+window.__mguuWebV040=true;
 
-const APP_VERSION='0.39 Web · Vercel';
+const APP_VERSION='0.40 Web · Vercel';
 const DEFAULT_GROUP={id:'000000230',name:'24ГМУ-СКР11.1'};
 const PORTAL_ORIGIN='https://portal.mguu.ru';
 const PORTAL_RATING_URL=PORTAL_ORIGIN+'/student/rating.php';
@@ -110,6 +110,11 @@ let ratingPeriodCatalog=[];
 let ratingBackgroundBusy=false;
 let ratingLastBackgroundAt=Number(localStorage.getItem(K_RATING_BG_LAST)||0)||0;
 let ratingBackgroundTimer=null;
+// Ported exactly from Android v0.48: these state holders are required by the
+// progressive detailed.php loader. Without them the web build throws before
+// the first detail request and leaves all control points as placeholders.
+let ratingDetailInflight=new Map();
+let ratingDetailRunSeq=0;
 let ratingLoadSeq=0;
 let pendingRatingSubjects=[];
 let pendingRatingMarks=[];
@@ -623,7 +628,7 @@ function saveRatingPeriod(){if(selectedBook){ratingPeriod=sanitizeRatingPeriod(r
 function ratingCacheKey(book,period){let p=normalizeRatingPeriod(period||ratingPeriod);return K_RATING_CACHE_BASE+'_'+ratingGroup.id+'_'+hash(String(book&&book.url||'none')+'|'+p.year+'|'+p.semester);}
 function ratingDetailCacheKey(url){return K_RATING_DETAIL_CACHE_BASE+'_'+hash(String(url||''));}
 function ratingReadDetailCache(url){let v=readJson(ratingDetailCacheKey(url),null);return v&&Array.isArray(v.points)?v:null;}
-function ratingReadDetailPoints(url){let v=ratingReadDetailCache(url);return v?v.points:null;}
+function ratingReadDetailPoints(url){let v=ratingReadDetailCache(url);return ratingDetailCacheUsable(v)?v.points:null;}
 function ratingWriteDetailPoints(url,points,recognized){
   if(!url||!Array.isArray(points))return;
   let normalized=points.map(function(p,i){return {label:'Контрольная точка '+(i+1),value:cleanLine(p&&p.value||'')||'—'};});
@@ -644,6 +649,24 @@ function ratingRepairBrokenDetailCachesV039(){
       if(cache&&Array.isArray(cache.points)&&!ratingDetailCacheUsable(cache)){try{localStorage.removeItem(key);}catch(e){}}
     });
     localStorage.setItem(K_RATING_DETAIL_CACHE_REPAIR_V039,'1');
+  }catch(e){}
+}
+
+const K_RATING_DETAIL_CACHE_REPAIR_V040='mguu_v040_rating_detail_cache_repaired';
+function ratingRepairBrokenDetailCachesV040(){
+  try{
+    if(localStorage.getItem(K_RATING_DETAIL_CACHE_REPAIR_V040)==='1')return;
+    let keys=[];for(let i=0;i<localStorage.length;i++)keys.push(localStorage.key(i));
+    keys.forEach(function(key){
+      if(!key||key.indexOf(K_RATING_DETAIL_CACHE_BASE+'_')!==0)return;
+      let cache=readJson(key,null);
+      if(cache&&Array.isArray(cache.points)&&!ratingDetailCacheUsable(cache)){try{localStorage.removeItem(key);}catch(e){}}
+    });
+    // Force the next summary check immediately after upgrading. This is a
+    // one-time repair of web builds where detailed.php never ran.
+    ratingLastBackgroundAt=0;
+    try{localStorage.setItem(K_RATING_BG_LAST,'0');}catch(e){}
+    localStorage.setItem(K_RATING_DETAIL_CACHE_REPAIR_V040,'1');
   }catch(e){}
 }
 function ratingPlaceholderControlPoints(){return [1,2,3,4,5].map(function(n){return {label:'Контрольная точка '+n,value:'—'};});}
@@ -1655,7 +1678,8 @@ function ratingRepairControlPointDuplicatesInData(data){
     let hasModule=(item.details||[]).some(function(d){return /^модуль\s*1$/i.test(cleanLine(d&&d.label||''));});
     let hasPoint=(item.details||[]).some(function(d){return /^контрольная\s+точка\s+[1-5]$/i.test(cleanLine(d&&d.label||''));});
     if(!hasModule&&!hasPoint&&!item.detailUrl)return;
-    let points=ratingControlPointsFromItem(item)||(item.detailUrl?ratingReadDetailPoints(item.detailUrl):null)||ratingPlaceholderControlPoints();ratingReplaceModuleOneWithControlPoints(item,points);
+    let itemPoints=ratingControlPointsFromItem(item),cachedPoints=item.detailUrl?ratingReadDetailPoints(item.detailUrl):null;
+    let points=cachedPoints||(itemPoints&&ratingControlPointsHaveValues(itemPoints)?itemPoints:null)||ratingPlaceholderControlPoints();ratingReplaceModuleOneWithControlPoints(item,points);
   });return data;
 }
 function ratingRepairAllCachedControlPointsV048(){
@@ -1683,7 +1707,12 @@ function ratingDetailSubjectsToRefresh(data,baseline,forceAll){
   }).map(function(x){return x.subject;});
 }
 function ratingSeedDetailPointsFromCache(data,baseline){
-  if(!baseline)return data;ratingSubjectsResolved(data).forEach(function(item){if(!item||!item.detailUrl||ratingReadDetailCache(item.detailUrl))return;let old=ratingSubjectItem(baseline,item.subject),points=ratingControlPointsFromItem(old);if(!points)return;ratingWriteDetailPoints(item.detailUrl,points);ratingReplaceModuleOneWithControlPoints(item,points);});return data;
+  if(!baseline)return data;ratingSubjectsResolved(data).forEach(function(item){
+    if(!item||!item.detailUrl||ratingDetailCacheUsable(ratingReadDetailCache(item.detailUrl)))return;
+    let old=ratingSubjectItem(baseline,item.subject),points=ratingControlPointsFromItem(old);
+    if(!points||!ratingControlPointsHaveValues(points))return;
+    ratingWriteDetailPoints(item.detailUrl,points,true);ratingReplaceModuleOneWithControlPoints(item,points);
+  });return data;
 }
 function ratingPatchControlPointRows(subject,points){
   let card=Array.from(document.querySelectorAll('.ratingCard[data-rating-subject]')).find(function(c){return normalizeSubject(c.dataset.ratingSubject||'')===normalizeSubject(subject);});if(!card)return;
@@ -2213,7 +2242,7 @@ const CSS=`
 #app[data-theme=dark] .sdoProfile{background:linear-gradient(135deg,#29334b,#3a2f4c);color:#eef2fa}#app[data-theme=dark] .sdoAvatar{background:#1b2029;color:#9dacff}#app[data-theme=dark] .sdoLogout{background:rgba(28,32,42,.68);color:#dce3f0}#app[data-theme=dark] .sdoBlock,#app[data-theme=dark] .sdoLoginCard{background:#1c2028;color:#edf1f7}#app[data-theme=dark] .sdoDeadline,#app[data-theme=dark] .sdoCourseCard,#app[data-theme=dark] .sdoGradeCard{background:#252a34;color:#e7ebf3}#app[data-theme=dark] .sdoCourseIcon{background:#32394c;color:#aebcff}#app[data-theme=dark] .sdoLoginForm input{background:#242933;border-color:#3b424f;color:#f1f4f9}#app[data-theme=dark] .sdoPrivacy{background:#252b36;color:#b7c0cf}#app[data-theme=dark] .sdoPrivacy b{color:#e2e7ef}#app[data-theme=dark] .sdoCourseSection{border-color:#363d49}#app[data-theme=dark] .sdoCourseSection button,#app[data-theme=dark] .sdoCourseGrade{color:#e8edf5;border-color:#323845}
 html.samsung-fold .top{padding-top:max(38px,calc(env(safe-area-inset-top,0px) + 14px))}html.android-edge:not(.samsung-fold) .top{padding-top:max(28px,calc(env(safe-area-inset-top,0px) + 12px))}@media(max-width:390px) and (min-height:700px){.top{padding-top:max(30px,calc(env(safe-area-inset-top,0px) + 12px))}}@media(max-width:360px){.title{font-size:23px}.lesson{grid-template-columns:42px 65px 1fr}.info h3{font-size:15px}.top{padding-left:12px;padding-right:12px}.tabs,.changeBanner{margin-left:12px;margin-right:12px}main{padding-left:11px;padding-right:11px}}
 .ratingControls{display:flex;flex-direction:column;gap:10px;padding:3px 16px 13px}.ratingPeriodControls{display:grid;grid-template-columns:1fr 1fr;gap:9px}.ratingPeriodButton{position:relative;display:grid;grid-template-columns:minmax(0,1fr) 18px;align-items:center;column-gap:8px;min-width:0;min-height:54px;padding:10px 12px;border:0;border-radius:14px;background:#e9edf5;color:#334155;text-align:left;box-shadow:0 2px 7px rgba(45,57,82,.05)}.ratingPeriodButton>strong{grid-column:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:800}.ratingPeriodButton .groupChevron{grid-column:2;width:17px;height:17px}.ratingPeriodButton:active{transform:scale(.985);filter:brightness(.97)}.ratingPeriodPicker{display:flex;flex-direction:column;gap:7px}.ratingPeriodNativeState{min-height:190px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:20px 10px}.ratingPeriodNativeState .emptyTitle{margin-top:10px}.ratingPeriodNativeIcon{width:42px;height:42px;border-radius:14px;display:flex;align-items:center;justify-content:center;background:#e9edf8;color:#5b6fe8;font-size:22px;font-weight:900}.ratingPeriodSpinner{width:34px;height:34px;border-radius:50%;border:3px solid rgba(91,111,232,.18);border-top-color:#5b6fe8;animation:spin .8s linear infinite}#app[data-theme=dark] .ratingPeriodNativeIcon{background:#30374a;color:#c9d2ff}#app[data-theme=dark] .ratingPeriodSpinner{border-color:rgba(201,210,255,.18);border-top-color:#c9d2ff}.ratingPeriodItem{width:100%;display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:48px;padding:11px 13px;border:0;border-radius:14px;background:#f1f3f8;color:#2c3749;text-align:left;font-size:13px;font-weight:780}.ratingPeriodItem.current{background:#e4e9ff;color:#4051ad}.ratingDetails{background:rgba(255,255,255,.24)}#app[data-theme=dark] .ratingPeriodButton{background:#242832;color:#e8edf5}#app[data-theme=dark] .ratingPeriodItem{background:#242933;color:#edf1f7}#app[data-theme=dark] .ratingPeriodItem.current{background:#313a5a;color:#c9d2ff}@media(max-width:370px){.ratingPeriodControls{grid-template-columns:1fr}.ratingCardHead{grid-template-columns:minmax(0,1fr) auto 22px}.ratingTotal b{font-size:19px}}
-/* iPhone / Safari / Home Screen — v0.39 / Vercel */
+/* iPhone / Safari / Home Screen — v0.40 / Vercel */
 @supports (-webkit-touch-callout:none){html,body{overscroll-behavior:none;-webkit-text-size-adjust:100%}#app{min-height:100dvh}.top{padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}.tabs{margin-left:max(16px,env(safe-area-inset-left,0px));margin-right:max(16px,env(safe-area-inset-right,0px))}.navrow{padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}.changeBanner{margin-left:max(16px,env(safe-area-inset-left,0px));margin-right:max(16px,env(safe-area-inset-right,0px))}main,.sdoDashboard{padding-left:max(14px,env(safe-area-inset-left,0px));padding-right:max(14px,env(safe-area-inset-right,0px))}footer{padding-left:max(17px,env(safe-area-inset-left,0px));padding-right:max(17px,env(safe-area-inset-right,0px));padding-bottom:max(12px,env(safe-area-inset-bottom,0px))}.modalBox{padding-bottom:max(16px,calc(env(safe-area-inset-bottom,0px) + 10px))}.notificationPanel{padding-left:max(14px,env(safe-area-inset-left,0px));padding-right:max(14px,env(safe-area-inset-right,0px))}.drawer{padding-left:max(14px,env(safe-area-inset-left,0px))}input,select,textarea{font-size:16px!important}}
 `;
 
@@ -2226,6 +2255,7 @@ let initialEvents=[];try{initialEvents=parseScheduleDoc(document);}catch(e){}
 installShell();
 migrateRatingPortalUrlsV039();
 ratingRepairBrokenDetailCachesV039();
+ratingRepairBrokenDetailCachesV040();
 ratingRepairAllCachedControlPointsV048();
 nativeNotificationAction('ready');
 let cache=readGroupJson(K_CACHE_BASE,null);if(cache&&cache.events&&cache.events.length){allEvents=cache.events;lastRange={start:cache.start,end:cache.end};render();setStatus('Показана сохранённая версия, проверяем обновления...');setTimeout(dismissSplash,1050);}else if(selectedGroup.id===DEFAULT_GROUP.id&&initialEvents.length){allEvents=initialEvents;render();setTimeout(dismissSplash,1050);}

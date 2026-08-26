@@ -1,5 +1,5 @@
-const CACHE='mguu-web-v039-vercel';
-const BUILD='039';
+const CACHE='mguu-web-v040-vercel';
+const BUILD='040';
 const BASE=new URL('./',self.location.href);
 const asset=p=>new URL(p,BASE).href;
 const SHELL=[
