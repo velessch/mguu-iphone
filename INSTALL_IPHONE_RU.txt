@@ -1,4 +1,4 @@
-МГУУ Web v0.40 — iPhone / Vercel
+МГУУ Web v0.41 — iPhone / Vercel
 
 ЭТОТ АРХИВ ПОДГОТОВЛЕН ДЛЯ VERCEL.
 

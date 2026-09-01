@@ -1,9 +1,9 @@
 (function(){
 'use strict';
-if(window.__mguuWebV040){return;}
-window.__mguuWebV040=true;
+if(window.__mguuWebV041){return;}
+window.__mguuWebV041=true;
 
-const APP_VERSION='0.40 Web · Vercel';
+const APP_VERSION='0.41 Web · Vercel';
 const DEFAULT_GROUP={id:'000000230',name:'24ГМУ-СКР11.1'};
 const PORTAL_ORIGIN='https://portal.mguu.ru';
 const PORTAL_RATING_URL=PORTAL_ORIGIN+'/student/rating.php';
@@ -78,7 +78,9 @@ const K_RATING_PERIOD_BASE='olesya_v035_rating_period';
 const K_RATING_BG_LAST='mguu_v046_rating_bg_last';
 const K_RATING_DETAIL_CACHE_BASE='mguu_v047_rating_detail';
 const K_RATING_CACHE_REPAIR_V048='mguu_v048_rating_cache_repaired';
+const K_RATING_AVAILABLE_PERIODS_BASE='mguu_v041_rating_available_periods';
 const RATING_BACKGROUND_INTERVAL=2*60*1000;
+const RATING_PERIOD_OPTIONS_INTERVAL=2*60*1000;
 const K_NOTIFICATIONS='mguu_v017_notifications';
 const K_NOTIFY_SCHEDULE_SCOPE='mguu_v021_notify_schedule_scope';
 const K_NOTIFY_RATING_SCOPE='mguu_v021_notify_rating_scope';
@@ -110,6 +112,8 @@ let ratingPeriodCatalog=[];
 let ratingBackgroundBusy=false;
 let ratingLastBackgroundAt=Number(localStorage.getItem(K_RATING_BG_LAST)||0)||0;
 let ratingBackgroundTimer=null;
+let ratingPeriodOptionsBusy=false;
+let ratingPeriodOptionsLastAt=0;
 // Ported exactly from Android v0.48: these state holders are required by the
 // progressive detailed.php loader. Without them the web build throws before
 // the first detail request and leaves all control points as placeholders.
@@ -622,6 +626,39 @@ async function fetchGroups(){
 function ratingBookKey(){return K_RATING_BOOK_BASE+'_'+ratingGroup.id;}
 function ratingBooksKey(){return K_RATING_BOOKS_BASE+'_'+ratingGroup.id;}
 function ratingPeriodKey(book){return K_RATING_PERIOD_BASE+'_'+ratingGroup.id+'_'+hash((book&&book.url)||'none');}
+function ratingAvailablePeriodsKey(){return K_RATING_AVAILABLE_PERIODS_BASE+'_'+String(ratingGroup&&ratingGroup.id||'');}
+function ratingStoredAvailablePeriods(){
+  let saved=readJson(ratingAvailablePeriodsKey(),null),opts=saved&&saved.options?saved.options:saved;
+  return sanitizeRatingPeriodOptions(opts||{years:[],semesters:[]});
+}
+function ratingPeriodOptionsSignature(opts){
+  opts=sanitizeRatingPeriodOptions(opts||{years:[],semesters:[]});
+  return JSON.stringify({years:(opts.years||[]).map(function(o){return [String(o.value||''),cleanLine(o.label||'')];}),semesters:(opts.semesters||[]).map(function(o){return [String(o.value||''),cleanLine(o.label||''),cleanLine(o.yearLabel||'')];})});
+}
+function ratingStoreAvailablePeriods(incoming){
+  let merged=ratingMergePeriodOptions(ratingStoredAvailablePeriods(),incoming||{years:[],semesters:[]});
+  writeJson(ratingAvailablePeriodsKey(),{checkedAt:new Date().toISOString(),options:merged});
+  ratingPeriodOptions=ratingMergePeriodOptions(ratingPeriodOptions,merged);
+  return merged;
+}
+async function refreshRatingAvailablePeriods(force,pickerKind){
+  if(ratingPeriodOptionsBusy)return false;
+  let now=Date.now();if(!force&&now-ratingPeriodOptionsLastAt<RATING_PERIOD_OPTIONS_INTERVAL)return false;
+  ratingPeriodOptionsBusy=true;ratingPeriodOptionsLastAt=now;
+  try{
+    let before=ratingPeriodOptionsSignature(ratingStoredAvailablePeriods());
+    let response=await fetchRatingResponse(ratingGroupUrl(ratingGroup));
+    let fresh=ratingActionablePeriodOptions(ratingPeriodStateFromDoc(response.doc,response.url||ratingGroupUrl(ratingGroup)));
+    fresh=sanitizeRatingPeriodOptions(fresh);
+    if(!fresh.years.length&&!fresh.semesters.length)return false;
+    let merged=ratingStoreAvailablePeriods(fresh),after=ratingPeriodOptionsSignature(merged),changed=before!==after;
+    if(pickerKind){
+      let host=document.getElementById('ratingPeriodPickerHost');
+      if(host){let options=ratingPickerOptions(pickerKind);if(options&&options.length){host.innerHTML=ratingPeriodPickerHtml(pickerKind,options);ratingBindNativePeriodItems(pickerKind);}}
+    }
+    return changed;
+  }catch(e){return false;}finally{ratingPeriodOptionsBusy=false;}
+}
 function normalizeRatingPeriod(p){p=p&&typeof p==='object'?p:{};return {year:String(p.year||''),yearLabel:String(p.yearLabel||p.year||''),semester:String(p.semester||''),semesterLabel:String(p.semesterLabel||p.semester||'')};}
 function loadStoredRatingPeriod(book){return sanitizeRatingPeriod(normalizeRatingPeriod(readJson(ratingPeriodKey(book),{})));}
 function saveRatingPeriod(){if(selectedBook){ratingPeriod=sanitizeRatingPeriod(ratingPeriod);writeJson(ratingPeriodKey(selectedBook),ratingPeriod);}}
@@ -1126,7 +1163,7 @@ function ratingNativePickerLoadingHtml(kind){
 async function refreshNativeRatingPeriodPicker(kind){
   let host=document.getElementById('ratingPeriodPickerHost');if(!host||!selectedBook)return;host.innerHTML=ratingNativePickerLoadingHtml(kind);
   try{
-    let received=await fetchRatingPeriodOptionsFast(selectedBook);ratingPeriodCatalog=[];ratingPeriodOptions=ratingMergePeriodOptions(ratingPeriodOptions,received);ratingPeriodOptions=sanitizeRatingPeriodOptions(ratingPeriodOptions);
+    let received=await fetchRatingPeriodOptionsFast(selectedBook);ratingPeriodCatalog=[];ratingStoreAvailablePeriods(received);ratingPeriodOptions=sanitizeRatingPeriodOptions(ratingPeriodOptions);
     let options=ratingPickerOptions(kind);host=document.getElementById('ratingPeriodPickerHost');if(!host)return;
     if(!options||!options.length){host.innerHTML=ratingNativePickerEmptyHtml(kind,'Портал не вернул доступные варианты. Страница портала не будет показана — можно повторить загрузку.');let retry=document.getElementById('ratingPeriodRetry');if(retry)retry.onclick=function(){refreshNativeRatingPeriodPicker(kind);};return;}
     host.innerHTML=ratingPeriodPickerHtml(kind,options);ratingBindNativePeriodItems(kind);
@@ -1418,9 +1455,10 @@ async function openRatingPeriodPicker(kind){
     let pick=document.getElementById('ratingPeriodPickBook');if(pick)pick.onclick=function(){closeModal();openRatingBooks();};
     return;
   }
+  ratingPeriodOptions=ratingMergePeriodOptions(ratingPeriodOptions,ratingStoredAvailablePeriods());
   let options=ratingPickerOptions(kind);
   openModal(title,'<div id="ratingPeriodPickerHost">'+((options&&options.length)?ratingPeriodPickerHtml(kind,options):ratingNativePickerLoadingHtml(kind))+'</div>');
-  if(options&&options.length){ratingBindNativePeriodItems(kind);return;}
+  if(options&&options.length){ratingBindNativePeriodItems(kind);refreshRatingAvailablePeriods(true,kind);return;}
   refreshNativeRatingPeriodPicker(kind);
 }
 function selectRatingPeriod(kind,value){
@@ -1795,7 +1833,7 @@ async function loadRating(forceDetails){
     let data=await fetchRatingData(selectedBook);if(run!==ratingLoadSeq)return;if(requestGroup!==String(ratingGroup.id||'')||requestBookUrl!==String(selectedBook&&selectedBook.url||''))return;
     let current=normalizeRatingPeriod(ratingPeriod);if(String(current.year||'')!==String(requestPeriod.year||'')||String(current.semester||'')!==String(requestPeriod.semester||''))return;
     ratingLastBackgroundAt=Date.now();try{localStorage.setItem(K_RATING_BG_LAST,String(ratingLastBackgroundAt));}catch(e){}
-    ratingPeriod=sanitizeRatingPeriod(data.period);ratingPeriodOptions=sanitizeRatingPeriodOptions(data.periodOptions||{years:[],semesters:[]});ratingPeriodCatalog=Array.isArray(data.periodCatalog)?data.periodCatalog:[];saveRatingPeriod();
+    ratingPeriod=sanitizeRatingPeriod(data.period);ratingPeriodOptions=sanitizeRatingPeriodOptions(data.periodOptions||{years:[],semesters:[]});ratingStoreAvailablePeriods(ratingPeriodOptions);ratingPeriodCatalog=Array.isArray(data.periodCatalog)?data.periodCatalog:[];saveRatingPeriod();
     let finalKey=ratingCacheKey(selectedBook,ratingPeriod),oldData=readJson(finalKey,null)||baseline;if(oldData)ratingRepairControlPointDuplicatesInData(oldData);ratingSeedDetailPointsFromCache(data,oldData);ratingRepairControlPointDuplicatesInData(data);
     let notifyScope=ratingNotificationScope(selectedBook),scopeChanged=localStorage.getItem(K_NOTIFY_RATING_SCOPE)!==notifyScope;localStorage.setItem(K_NOTIFY_RATING_SCOPE,notifyScope);
     let detailSubjects=ratingDetailSubjectsToRefresh(data,oldData,!!forceDetails);data.detailsPending=detailSubjects.length>0;ratingData=data;writeJson(finalKey,data);renderRating();
@@ -1813,11 +1851,11 @@ function ratingHydrateStoredState(){
   let storedBook=readJson(ratingBookKey(),null),storedPeriod=storedBook?loadStoredRatingPeriod(storedBook):normalizeRatingPeriod({}),sameBook=!!(selectedBook&&storedBook&&String(selectedBook.url||'')===String(storedBook.url||'')),samePeriod=sameBook&&String(ratingPeriod.year||'')===String(storedPeriod.year||'')&&String(ratingPeriod.semester||'')===String(storedPeriod.semester||'');
   let cachedBooks=readJson(ratingBooksKey(),null);ratingBooks=cachedBooks&&cachedBooks.books?cachedBooks.books:[];
   selectedBook=storedBook;ratingPeriod=storedPeriod;
-  if(!selectedBook){ratingData=null;ratingPeriodOptions={years:[],semesters:[]};ratingPeriodCatalog=[];updateBookButton();updateRatingPeriodControls();renderRating();return false;}
+  if(!selectedBook){ratingData=null;ratingPeriodOptions=ratingStoredAvailablePeriods();ratingPeriodCatalog=[];updateBookButton();updateRatingPeriodControls();renderRating();return false;}
   let cache=readJson(ratingCacheKey(selectedBook,ratingPeriod),null),sameData=!!(samePeriod&&ratingData&&cache&&String(ratingData.loadedAt||'')===String(cache.loadedAt||''));
-  if(sameData){updateBookButton();updateRatingPeriodControls();return true;}
-  ratingPeriodOptions={years:[],semesters:[]};ratingPeriodCatalog=[];
-  if(cache){ratingData=ratingRepairControlPointDuplicatesInData(cache);ratingPeriod=sanitizeRatingPeriod(cache.period||ratingPeriod);ratingPeriodOptions=sanitizeRatingPeriodOptions(cache.periodOptions||ratingPeriodOptions);ratingPeriodCatalog=Array.isArray(cache.periodCatalog)?cache.periodCatalog:[];updateBookButton();updateRatingPeriodControls();renderRating();return true;}
+  if(sameData){ratingPeriodOptions=ratingMergePeriodOptions(ratingPeriodOptions,ratingStoredAvailablePeriods());updateBookButton();updateRatingPeriodControls();return true;}
+  ratingPeriodOptions=ratingStoredAvailablePeriods();ratingPeriodCatalog=[];
+  if(cache){ratingData=ratingRepairControlPointDuplicatesInData(cache);ratingPeriod=sanitizeRatingPeriod(cache.period||ratingPeriod);ratingPeriodOptions=ratingMergePeriodOptions(sanitizeRatingPeriodOptions(cache.periodOptions||{years:[],semesters:[]}),ratingPeriodOptions);ratingPeriodCatalog=Array.isArray(cache.periodCatalog)?cache.periodCatalog:[];updateBookButton();updateRatingPeriodControls();renderRating();return true;}
   ratingData=null;updateBookButton();updateRatingPeriodControls();renderRating();return false;
 }
 async function checkRatingInBackground(force){
@@ -1830,19 +1868,20 @@ async function checkRatingInBackground(force){
     let data=await fetchRatingData(selectedBook);if(requestGroup!==String(ratingGroup.id||'')||requestBookUrl!==String(selectedBook&&selectedBook.url||''))return;let current=normalizeRatingPeriod(ratingPeriod);if(String(current.year||'')!==String(requestPeriod.year||'')||String(current.semester||'')!==String(requestPeriod.semester||''))return;
     let actualPeriod=sanitizeRatingPeriod(data.period||requestPeriod),finalKey=ratingCacheKey(selectedBook,actualPeriod),baseline=readJson(finalKey,null)||oldData;if(baseline)ratingRepairControlPointDuplicatesInData(baseline);ratingSeedDetailPointsFromCache(data,baseline);ratingRepairControlPointDuplicatesInData(data);
     let notifyScope=ratingNotificationScope(selectedBook),scopeChanged=localStorage.getItem(K_NOTIFY_RATING_SCOPE)!==notifyScope;localStorage.setItem(K_NOTIFY_RATING_SCOPE,notifyScope);let detailSubjects=ratingDetailSubjectsToRefresh(data,baseline,!!force);data.detailsPending=detailSubjects.length>0;writeJson(finalKey,data);
-    if(section==='rating'&&ratingContextMatches({groupId:requestGroup,bookUrl:requestBookUrl,period:actualPeriod})){ratingData=data;ratingPeriod=actualPeriod;ratingPeriodOptions=sanitizeRatingPeriodOptions(data.periodOptions||ratingPeriodOptions);ratingPeriodCatalog=Array.isArray(data.periodCatalog)?data.periodCatalog:[];saveRatingPeriod();renderRating();}
+    if(section==='rating'&&ratingContextMatches({groupId:requestGroup,bookUrl:requestBookUrl,period:actualPeriod})){ratingData=data;ratingPeriod=actualPeriod;ratingPeriodOptions=sanitizeRatingPeriodOptions(data.periodOptions||ratingPeriodOptions);ratingStoreAvailablePeriods(ratingPeriodOptions);ratingPeriodCatalog=Array.isArray(data.periodCatalog)?data.periodCatalog:[];saveRatingPeriod();renderRating();}
     if(!detailSubjects.length){if(!scopeChanged){let changed=ratingScoreChanges(baseline,data);if(changed.length&&ratingContextMatches({groupId:requestGroup,bookUrl:requestBookUrl,period:actualPeriod}))addRatingChangeNotifications(changed,data);}return;}
     let ctx={groupId:requestGroup,bookUrl:requestBookUrl,period:actualPeriod,cacheKey:finalKey,scopeChanged:scopeChanged};ratingRefreshControlPointsProgressively(data,ctx,baseline,detailSubjects);
   }catch(e){}finally{ratingBackgroundBusy=false;}
 }
 
 function startRatingBackgroundChecks(){
-  setTimeout(function(){if(!document.hidden)checkRatingInBackground(false);},1600);
-  if(ratingBackgroundTimer)clearInterval(ratingBackgroundTimer);ratingBackgroundTimer=setInterval(function(){if(!document.hidden)checkRatingInBackground(false);},RATING_BACKGROUND_INTERVAL);
-  document.addEventListener('visibilitychange',function(){if(!document.hidden){if(section==='rating')ratingHydrateStoredState();checkRatingInBackground(false);}});
+  setTimeout(function(){if(!document.hidden){refreshRatingAvailablePeriods(false);checkRatingInBackground(false);}},1600);
+  if(ratingBackgroundTimer)clearInterval(ratingBackgroundTimer);ratingBackgroundTimer=setInterval(function(){if(!document.hidden){refreshRatingAvailablePeriods(false);checkRatingInBackground(false);}},RATING_BACKGROUND_INTERVAL);
+  document.addEventListener('visibilitychange',function(){if(!document.hidden){if(section==='rating')ratingHydrateStoredState();refreshRatingAvailablePeriods(false);checkRatingInBackground(false);}});
 }
 async function loadRatingBooks(){
   let hadCache=ratingHydrateStoredState();
+  refreshRatingAvailablePeriods(true);
   if(!selectedBook){dismissSplash();return;}
   if(hadCache){let suffix=[ratingPeriod.yearLabel,ratingPeriod.semesterLabel].filter(Boolean).join(' · ');setStatus('Сохранённый рейтинг'+(suffix?' · '+suffix:''));dismissSplash();setTimeout(function(){checkRatingInBackground(false);},250);return;}
   loadRating();
@@ -2069,7 +2108,7 @@ function bindUi(){
   document.querySelectorAll('.tabs button').forEach(b=>b.onclick=function(){let m=b.dataset.mode;if(m==='calendar'){openPeriodPicker();return;}setMode(m);});
   document.getElementById('prev').onclick=()=>movePeriod(-1);
   document.getElementById('next').onclick=()=>movePeriod(1);
-  document.getElementById('refresh').onclick=()=>section==='rating'?loadRating(true):(section==='sdo'?loadSdo(false):loadMain(false));
+  document.getElementById('refresh').onclick=()=>section==='rating'?(refreshRatingAvailablePeriods(true),loadRating(true)):(section==='sdo'?loadSdo(false):loadMain(false));
   document.getElementById('groupSelect').onclick=()=>section==='rating'?openRatingGroups():openGroups();
   document.getElementById('bookSelect').onclick=openRatingBooks;
   document.getElementById('ratingYear').onclick=function(){openRatingPeriodPicker('year');};
@@ -2242,7 +2281,7 @@ const CSS=`
 #app[data-theme=dark] .sdoProfile{background:linear-gradient(135deg,#29334b,#3a2f4c);color:#eef2fa}#app[data-theme=dark] .sdoAvatar{background:#1b2029;color:#9dacff}#app[data-theme=dark] .sdoLogout{background:rgba(28,32,42,.68);color:#dce3f0}#app[data-theme=dark] .sdoBlock,#app[data-theme=dark] .sdoLoginCard{background:#1c2028;color:#edf1f7}#app[data-theme=dark] .sdoDeadline,#app[data-theme=dark] .sdoCourseCard,#app[data-theme=dark] .sdoGradeCard{background:#252a34;color:#e7ebf3}#app[data-theme=dark] .sdoCourseIcon{background:#32394c;color:#aebcff}#app[data-theme=dark] .sdoLoginForm input{background:#242933;border-color:#3b424f;color:#f1f4f9}#app[data-theme=dark] .sdoPrivacy{background:#252b36;color:#b7c0cf}#app[data-theme=dark] .sdoPrivacy b{color:#e2e7ef}#app[data-theme=dark] .sdoCourseSection{border-color:#363d49}#app[data-theme=dark] .sdoCourseSection button,#app[data-theme=dark] .sdoCourseGrade{color:#e8edf5;border-color:#323845}
 html.samsung-fold .top{padding-top:max(38px,calc(env(safe-area-inset-top,0px) + 14px))}html.android-edge:not(.samsung-fold) .top{padding-top:max(28px,calc(env(safe-area-inset-top,0px) + 12px))}@media(max-width:390px) and (min-height:700px){.top{padding-top:max(30px,calc(env(safe-area-inset-top,0px) + 12px))}}@media(max-width:360px){.title{font-size:23px}.lesson{grid-template-columns:42px 65px 1fr}.info h3{font-size:15px}.top{padding-left:12px;padding-right:12px}.tabs,.changeBanner{margin-left:12px;margin-right:12px}main{padding-left:11px;padding-right:11px}}
 .ratingControls{display:flex;flex-direction:column;gap:10px;padding:3px 16px 13px}.ratingPeriodControls{display:grid;grid-template-columns:1fr 1fr;gap:9px}.ratingPeriodButton{position:relative;display:grid;grid-template-columns:minmax(0,1fr) 18px;align-items:center;column-gap:8px;min-width:0;min-height:54px;padding:10px 12px;border:0;border-radius:14px;background:#e9edf5;color:#334155;text-align:left;box-shadow:0 2px 7px rgba(45,57,82,.05)}.ratingPeriodButton>strong{grid-column:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:800}.ratingPeriodButton .groupChevron{grid-column:2;width:17px;height:17px}.ratingPeriodButton:active{transform:scale(.985);filter:brightness(.97)}.ratingPeriodPicker{display:flex;flex-direction:column;gap:7px}.ratingPeriodNativeState{min-height:190px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:20px 10px}.ratingPeriodNativeState .emptyTitle{margin-top:10px}.ratingPeriodNativeIcon{width:42px;height:42px;border-radius:14px;display:flex;align-items:center;justify-content:center;background:#e9edf8;color:#5b6fe8;font-size:22px;font-weight:900}.ratingPeriodSpinner{width:34px;height:34px;border-radius:50%;border:3px solid rgba(91,111,232,.18);border-top-color:#5b6fe8;animation:spin .8s linear infinite}#app[data-theme=dark] .ratingPeriodNativeIcon{background:#30374a;color:#c9d2ff}#app[data-theme=dark] .ratingPeriodSpinner{border-color:rgba(201,210,255,.18);border-top-color:#c9d2ff}.ratingPeriodItem{width:100%;display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:48px;padding:11px 13px;border:0;border-radius:14px;background:#f1f3f8;color:#2c3749;text-align:left;font-size:13px;font-weight:780}.ratingPeriodItem.current{background:#e4e9ff;color:#4051ad}.ratingDetails{background:rgba(255,255,255,.24)}#app[data-theme=dark] .ratingPeriodButton{background:#242832;color:#e8edf5}#app[data-theme=dark] .ratingPeriodItem{background:#242933;color:#edf1f7}#app[data-theme=dark] .ratingPeriodItem.current{background:#313a5a;color:#c9d2ff}@media(max-width:370px){.ratingPeriodControls{grid-template-columns:1fr}.ratingCardHead{grid-template-columns:minmax(0,1fr) auto 22px}.ratingTotal b{font-size:19px}}
-/* iPhone / Safari / Home Screen — v0.40 / Vercel */
+/* iPhone / Safari / Home Screen — v0.41 / Vercel */
 @supports (-webkit-touch-callout:none){html,body{overscroll-behavior:none;-webkit-text-size-adjust:100%}#app{min-height:100dvh}.top{padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}.tabs{margin-left:max(16px,env(safe-area-inset-left,0px));margin-right:max(16px,env(safe-area-inset-right,0px))}.navrow{padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}.changeBanner{margin-left:max(16px,env(safe-area-inset-left,0px));margin-right:max(16px,env(safe-area-inset-right,0px))}main,.sdoDashboard{padding-left:max(14px,env(safe-area-inset-left,0px));padding-right:max(14px,env(safe-area-inset-right,0px))}footer{padding-left:max(17px,env(safe-area-inset-left,0px));padding-right:max(17px,env(safe-area-inset-right,0px));padding-bottom:max(12px,env(safe-area-inset-bottom,0px))}.modalBox{padding-bottom:max(16px,calc(env(safe-area-inset-bottom,0px) + 10px))}.notificationPanel{padding-left:max(14px,env(safe-area-inset-left,0px));padding-right:max(14px,env(safe-area-inset-right,0px))}.drawer{padding-left:max(14px,env(safe-area-inset-left,0px))}input,select,textarea{font-size:16px!important}}
 `;
 
