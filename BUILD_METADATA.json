@@ -1,5 +1,5 @@
 {
-  "version": "0.41",
+  "version": "0.42",
   "target": "iPhone / Safari / PWA / Vercel",
   "based_on": "MGUU Web v0.33",
   "backend": "Vercel Node.js Function: api/backend.mjs",
@@ -21,6 +21,6 @@
     "Saved rating book URLs, period/cache references, notification book URLs and detailed.php references are migrated to canonical portal URLs without clearing localStorage",
     "vercel.json includes a compatibility /student/:path* rewrite to the portal backend so legacy relative links cannot fall through to Vercel 403",
     "PWA cache/update protections from v0.37 remain enabled",
-    "v0.41 automatically refreshes the available academic-year list from rating.php on app/rating open, foreground return, manual refresh and the existing 2-minute visible-app background cycle; new years are added without changing the selected period or rating display mechanics"
+    "v0.42 automatically refreshes the available academic-year list from rating.php on app/rating open, foreground return, manual refresh and the existing 2-minute visible-app background cycle; new years are added without changing the selected period or rating display mechanics"
   ]
 }

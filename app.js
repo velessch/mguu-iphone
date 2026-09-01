@@ -1,9 +1,9 @@
 (function(){
 'use strict';
-if(window.__mguuWebV041){return;}
-window.__mguuWebV041=true;
+if(window.__mguuWebV042){return;}
+window.__mguuWebV042=true;
 
-const APP_VERSION='0.41 Web · Vercel';
+const APP_VERSION='0.42 Web · Vercel';
 const DEFAULT_GROUP={id:'000000230',name:'24ГМУ-СКР11.1'};
 const PORTAL_ORIGIN='https://portal.mguu.ru';
 const PORTAL_RATING_URL=PORTAL_ORIGIN+'/student/rating.php';
@@ -112,8 +112,7 @@ let ratingPeriodCatalog=[];
 let ratingBackgroundBusy=false;
 let ratingLastBackgroundAt=Number(localStorage.getItem(K_RATING_BG_LAST)||0)||0;
 let ratingBackgroundTimer=null;
-let ratingPeriodOptionsBusy=false;
-let ratingPeriodOptionsLastAt=0;
+const ratingPeriodRefreshState={busy:false,lastAt:0};
 // Ported exactly from Android v0.48: these state holders are required by the
 // progressive detailed.php loader. Without them the web build throws before
 // the first detail request and leaves all control points as placeholders.
@@ -642,9 +641,9 @@ function ratingStoreAvailablePeriods(incoming){
   return merged;
 }
 async function refreshRatingAvailablePeriods(force,pickerKind){
-  if(ratingPeriodOptionsBusy)return false;
-  let now=Date.now();if(!force&&now-ratingPeriodOptionsLastAt<RATING_PERIOD_OPTIONS_INTERVAL)return false;
-  ratingPeriodOptionsBusy=true;ratingPeriodOptionsLastAt=now;
+  if(ratingPeriodRefreshState.busy)return false;
+  let now=Date.now();if(!force&&now-ratingPeriodRefreshState.lastAt<RATING_PERIOD_OPTIONS_INTERVAL)return false;
+  ratingPeriodRefreshState.busy=true;ratingPeriodRefreshState.lastAt=now;
   try{
     let before=ratingPeriodOptionsSignature(ratingStoredAvailablePeriods());
     let response=await fetchRatingResponse(ratingGroupUrl(ratingGroup));
@@ -657,7 +656,7 @@ async function refreshRatingAvailablePeriods(force,pickerKind){
       if(host){let options=ratingPickerOptions(pickerKind);if(options&&options.length){host.innerHTML=ratingPeriodPickerHtml(pickerKind,options);ratingBindNativePeriodItems(pickerKind);}}
     }
     return changed;
-  }catch(e){return false;}finally{ratingPeriodOptionsBusy=false;}
+  }catch(e){return false;}finally{ratingPeriodRefreshState.busy=false;}
 }
 function normalizeRatingPeriod(p){p=p&&typeof p==='object'?p:{};return {year:String(p.year||''),yearLabel:String(p.yearLabel||p.year||''),semester:String(p.semester||''),semesterLabel:String(p.semesterLabel||p.semester||'')};}
 function loadStoredRatingPeriod(book){return sanitizeRatingPeriod(normalizeRatingPeriod(readJson(ratingPeriodKey(book),{})));}
@@ -2281,7 +2280,7 @@ const CSS=`
 #app[data-theme=dark] .sdoProfile{background:linear-gradient(135deg,#29334b,#3a2f4c);color:#eef2fa}#app[data-theme=dark] .sdoAvatar{background:#1b2029;color:#9dacff}#app[data-theme=dark] .sdoLogout{background:rgba(28,32,42,.68);color:#dce3f0}#app[data-theme=dark] .sdoBlock,#app[data-theme=dark] .sdoLoginCard{background:#1c2028;color:#edf1f7}#app[data-theme=dark] .sdoDeadline,#app[data-theme=dark] .sdoCourseCard,#app[data-theme=dark] .sdoGradeCard{background:#252a34;color:#e7ebf3}#app[data-theme=dark] .sdoCourseIcon{background:#32394c;color:#aebcff}#app[data-theme=dark] .sdoLoginForm input{background:#242933;border-color:#3b424f;color:#f1f4f9}#app[data-theme=dark] .sdoPrivacy{background:#252b36;color:#b7c0cf}#app[data-theme=dark] .sdoPrivacy b{color:#e2e7ef}#app[data-theme=dark] .sdoCourseSection{border-color:#363d49}#app[data-theme=dark] .sdoCourseSection button,#app[data-theme=dark] .sdoCourseGrade{color:#e8edf5;border-color:#323845}
 html.samsung-fold .top{padding-top:max(38px,calc(env(safe-area-inset-top,0px) + 14px))}html.android-edge:not(.samsung-fold) .top{padding-top:max(28px,calc(env(safe-area-inset-top,0px) + 12px))}@media(max-width:390px) and (min-height:700px){.top{padding-top:max(30px,calc(env(safe-area-inset-top,0px) + 12px))}}@media(max-width:360px){.title{font-size:23px}.lesson{grid-template-columns:42px 65px 1fr}.info h3{font-size:15px}.top{padding-left:12px;padding-right:12px}.tabs,.changeBanner{margin-left:12px;margin-right:12px}main{padding-left:11px;padding-right:11px}}
 .ratingControls{display:flex;flex-direction:column;gap:10px;padding:3px 16px 13px}.ratingPeriodControls{display:grid;grid-template-columns:1fr 1fr;gap:9px}.ratingPeriodButton{position:relative;display:grid;grid-template-columns:minmax(0,1fr) 18px;align-items:center;column-gap:8px;min-width:0;min-height:54px;padding:10px 12px;border:0;border-radius:14px;background:#e9edf5;color:#334155;text-align:left;box-shadow:0 2px 7px rgba(45,57,82,.05)}.ratingPeriodButton>strong{grid-column:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:800}.ratingPeriodButton .groupChevron{grid-column:2;width:17px;height:17px}.ratingPeriodButton:active{transform:scale(.985);filter:brightness(.97)}.ratingPeriodPicker{display:flex;flex-direction:column;gap:7px}.ratingPeriodNativeState{min-height:190px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:20px 10px}.ratingPeriodNativeState .emptyTitle{margin-top:10px}.ratingPeriodNativeIcon{width:42px;height:42px;border-radius:14px;display:flex;align-items:center;justify-content:center;background:#e9edf8;color:#5b6fe8;font-size:22px;font-weight:900}.ratingPeriodSpinner{width:34px;height:34px;border-radius:50%;border:3px solid rgba(91,111,232,.18);border-top-color:#5b6fe8;animation:spin .8s linear infinite}#app[data-theme=dark] .ratingPeriodNativeIcon{background:#30374a;color:#c9d2ff}#app[data-theme=dark] .ratingPeriodSpinner{border-color:rgba(201,210,255,.18);border-top-color:#c9d2ff}.ratingPeriodItem{width:100%;display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:48px;padding:11px 13px;border:0;border-radius:14px;background:#f1f3f8;color:#2c3749;text-align:left;font-size:13px;font-weight:780}.ratingPeriodItem.current{background:#e4e9ff;color:#4051ad}.ratingDetails{background:rgba(255,255,255,.24)}#app[data-theme=dark] .ratingPeriodButton{background:#242832;color:#e8edf5}#app[data-theme=dark] .ratingPeriodItem{background:#242933;color:#edf1f7}#app[data-theme=dark] .ratingPeriodItem.current{background:#313a5a;color:#c9d2ff}@media(max-width:370px){.ratingPeriodControls{grid-template-columns:1fr}.ratingCardHead{grid-template-columns:minmax(0,1fr) auto 22px}.ratingTotal b{font-size:19px}}
-/* iPhone / Safari / Home Screen — v0.41 / Vercel */
+/* iPhone / Safari / Home Screen — v0.42 / Vercel */
 @supports (-webkit-touch-callout:none){html,body{overscroll-behavior:none;-webkit-text-size-adjust:100%}#app{min-height:100dvh}.top{padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}.tabs{margin-left:max(16px,env(safe-area-inset-left,0px));margin-right:max(16px,env(safe-area-inset-right,0px))}.navrow{padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}.changeBanner{margin-left:max(16px,env(safe-area-inset-left,0px));margin-right:max(16px,env(safe-area-inset-right,0px))}main,.sdoDashboard{padding-left:max(14px,env(safe-area-inset-left,0px));padding-right:max(14px,env(safe-area-inset-right,0px))}footer{padding-left:max(17px,env(safe-area-inset-left,0px));padding-right:max(17px,env(safe-area-inset-right,0px));padding-bottom:max(12px,env(safe-area-inset-bottom,0px))}.modalBox{padding-bottom:max(16px,calc(env(safe-area-inset-bottom,0px) + 10px))}.notificationPanel{padding-left:max(14px,env(safe-area-inset-left,0px));padding-right:max(14px,env(safe-area-inset-right,0px))}.drawer{padding-left:max(14px,env(safe-area-inset-left,0px))}input,select,textarea{font-size:16px!important}}
 `;
 
