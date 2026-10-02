@@ -1,9 +1,9 @@
 (function(){
 'use strict';
-if(window.__mguuWebV042){return;}
-window.__mguuWebV042=true;
+if(window.__mguuWebV043){return;}
+window.__mguuWebV043=true;
 
-const APP_VERSION='0.42 Web · Vercel';
+const APP_VERSION='0.43 Web · Vercel';
 const DEFAULT_GROUP={id:'000000230',name:'24ГМУ-СКР11.1'};
 const PORTAL_ORIGIN='https://portal.mguu.ru';
 const PORTAL_RATING_URL=PORTAL_ORIGIN+'/student/rating.php';
@@ -393,30 +393,68 @@ function addScheduleChangeNotifications(changes){
     addAppNotification('schedule',title,body,{date:date,count:items.length,changes:items.map(function(ch){let e=ch.now||ch.old||{};return {kind:ch.kind,date:e.date||date,pair:e.pair||'',subject:e.subject||''};})});
   });
 }
-function ratingSubjectsSignature(data){return ratingSubjectsResolved(data).map(x=>({subject:x.subject,total:x.total,details:x.details}));}
+function ratingSubjectsSignature(data){return ratingSubjectsResolved(data).map(function(x){return {subject:x.subject,total:cleanLine(x.total||''),moduleOneTotal:cleanLine(x.moduleOneTotal||''),details:(x.details||[]).map(function(d){return {label:cleanLine(d&&d.label||''),value:cleanLine(d&&d.value||'')};})};});}
+function ratingIsRealScoreValue(value){let s=cleanLine(value||'');return !!s&&!/^[-–—]$/.test(s)&&isScoreValue(s);}
+function ratingLooksGradeMetric(label){return /(кт\s*\d*|контрольн[а-яё]*\s+точк|модуль\s*\d+|балл|оценк|итог|общий|сумм|всего|рейтинг|экзамен|зач[её]т|результат)/i.test(cleanLine(label||''));}
+function ratingMetricIsTotal(label){return /(итог|общий|сумм|всего|рейтинг|результат)/i.test(cleanLine(label||''));}
+function ratingMetricIsPoint(label){return /^контрольная\s+точка\s+[1-5]$/i.test(cleanLine(label||''));}
+function ratingMetricIsModuleOne(label){return /^модуль\s*1$/i.test(cleanLine(label||''));}
+function ratingMetricIsModuleTwo(label){return /^модуль\s*2$/i.test(cleanLine(label||''));}
+function ratingNumericScore(value){let s=cleanLine(value||'').replace(',','.');if(!/^-?\d+(?:\.\d+)?$/.test(s))return null;let n=Number(s);return Number.isFinite(n)?n:null;}
+function ratingPointSum(item){let nums=(item&&item.details||[]).filter(function(d){return ratingMetricIsPoint(d.label)&&ratingIsRealScoreValue(d.value);}).map(function(d){return ratingNumericScore(d.value);}).filter(function(n){return n!==null;});if(!nums.length)return null;return Math.round(nums.reduce(function(a,b){return a+b;},0)*100)/100;}
+function ratingModuleOneSignatureValue(item){let direct=cleanLine(item&&item.moduleOneTotal||'');if(ratingIsRealScoreValue(direct))return direct;let row=(item&&item.details||[]).find(function(d){return ratingMetricIsModuleOne(d.label)&&ratingIsRealScoreValue(d.value);});if(row)return cleanLine(row.value);let sum=ratingPointSum(item);return sum===null?'':String(sum).replace('.',',');}
+function ratingNotificationChanges(items){
+  items=(items||[]).slice();let points=items.filter(function(x){return x.isPoint;}),module2=items.filter(function(x){return x.isModuleTwo;}),module1=items.filter(function(x){return x.isModuleOne;}),other=items.filter(function(x){return !x.isPoint&&!x.isModuleTwo&&!x.isModuleOne&&!x.isTotal;}),totals=items.filter(function(x){return x.isTotal;});
+  // Prefer the most specific grade change. Aggregate totals often move together
+  // with a KT and would otherwise create duplicate notifications for one event.
+  if(points.length)return points.concat(module2).concat(other);
+  if(module1.length||module2.length||other.length)return module1.concat(module2).concat(other);
+  return totals;
+}
+
 function ratingScoreChanges(oldData,newData){
-  let oldItems=ratingSubjectsSignature(oldData),newItems=ratingSubjectsSignature(newData);if(!oldItems.length||!newItems.length)return [];
-  let oldMap=new Map(oldItems.map(x=>[normalizeSubject(x.subject),x])),changes=[];
+  let oldItems=ratingSubjectsSignature(oldData),newItems=ratingSubjectsSignature(newData);if(!newItems.length)return [];
+  // A completely fresh install has no baseline, so existing historical grades are
+  // not treated as newly received. Once an empty/current rating was cached, every
+  // subsequently appearing subject and score is eligible for a notification.
+  if(oldData==null)return [];
+  let oldMap=new Map(oldItems.map(function(x){return [normalizeSubject(x.subject),x];})),changes=[];
   newItems.forEach(function(item){
-    let old=oldMap.get(normalizeSubject(item.subject));if(!old)return;
-    let oldDetails=new Map((old.details||[]).map(d=>[normalizeSubject(d.label),String(d.value||'')]));
+    let old=oldMap.get(normalizeSubject(item.subject)),oldDetails=new Map((old&&old.details||[]).map(function(d){return [normalizeSubject(d.label),cleanLine(d.value||'')];}));
+    let oldHadPoints=!!(old&&(old.details||[]).some(function(d){return ratingMetricIsPoint(d.label);})),newHasPoints=(item.details||[]).some(function(d){return ratingMetricIsPoint(d.label);});
+    let oldM1=old?ratingModuleOneSignatureValue(old):'',newM1=ratingModuleOneSignatureValue(item),oldM1n=ratingNumericScore(oldM1),newM1n=ratingNumericScore(newM1);
+    // If the portal later exposes the five detailed KTs for an already known
+    // Module 1 with the same sum, that is a data-structure enrichment, not a new grade.
+    let structuralPointExpansion=!!(old&&!oldHadPoints&&newHasPoints&&oldM1n!==null&&newM1n!==null&&Math.abs(oldM1n-newM1n)<0.0001);
     (item.details||[]).forEach(function(d){
-      let key=normalizeSubject(d.label),before=oldDetails.has(key)?oldDetails.get(key):'',after=String(d.value||'');
+      let label=cleanLine(d.label||''),key=normalizeSubject(label),before=oldDetails.has(key)?oldDetails.get(key):'',after=cleanLine(d.value||'');
       if(before===after)return;
-      let looksGrade=/(кт\s*\d*|контрольн[а-яё]*\s+точк|балл|оценк|итог|общий|сумм|всего|рейтинг|экзамен|зач[её]т|результат)/i.test(d.label)||isScoreValue(after)||isScoreValue(before);
-      if(!looksGrade)return;
-      changes.push({subject:item.subject,label:d.label,oldValue:before,newValue:after,kind:before?'changed':'added',isTotal:/(итог|общий|сумм|всего|рейтинг|результат)/i.test(d.label)});
+      if(structuralPointExpansion&&ratingMetricIsPoint(label)&&!oldDetails.has(key))return;
+      let beforeReal=ratingIsRealScoreValue(before),afterReal=ratingIsRealScoreValue(after),looksGrade=ratingLooksGradeMetric(label)||beforeReal||afterReal;if(!looksGrade)return;
+      // Ignore placeholder-to-placeholder structural changes. A real value appearing,
+      // changing, or disappearing remains a meaningful rating change.
+      if(!beforeReal&&!afterReal)return;
+      changes.push({subject:item.subject,label:label,oldValue:before,newValue:after,kind:!old?'added-subject':(!beforeReal&&afterReal?'added':'changed'),isTotal:ratingMetricIsTotal(label),isPoint:ratingMetricIsPoint(label),isModuleOne:ratingMetricIsModuleOne(label),isModuleTwo:ratingMetricIsModuleTwo(label),newSubject:!old});
     });
+    // Defensive fallback for a new card whose portal markup exposes only summary
+    // fields outside the details array. This guarantees that a real first score is
+    // not lost just because the new portal row has a slightly different shape.
+    if(!old&&!changes.some(function(ch){return normalizeSubject(ch.subject)===normalizeSubject(item.subject);})) {
+      let m1=ratingModuleOneSignatureValue(item),total=cleanLine(item.total||'');
+      if(ratingIsRealScoreValue(m1))changes.push({subject:item.subject,label:'Модуль 1',oldValue:'',newValue:m1,kind:'added-subject',isTotal:false,isPoint:false,isModuleOne:true,isModuleTwo:false,newSubject:true});
+      else if(ratingIsRealScoreValue(total))changes.push({subject:item.subject,label:'Общий балл',oldValue:'',newValue:total,kind:'added-subject',isTotal:true,isPoint:false,isModuleOne:false,isModuleTwo:false,newSubject:true});
+    }
   });
   return changes;
 }
 function addRatingChangeNotifications(changes,data){
   let groups=new Map();(changes||[]).forEach(function(ch){if(!groups.has(ch.subject))groups.set(ch.subject,[]);groups.get(ch.subject).push(ch);});
   groups.forEach(function(items,subject){
-    items.sort(function(a,b){return Number(a.isTotal)-Number(b.isTotal);});let first=items[0],isNew=!first.oldValue||/^[-–—]$/.test(first.oldValue),title=isNew?'Новая оценка':'Изменилась оценка';
-    let scoreText=isNew?(first.label+': '+first.newValue):(first.label+': '+first.oldValue+' → '+first.newValue);
-    let body=subject+' · '+scoreText+(items.length>1?' · ещё изменений: '+(items.length-1):'')+'.';
-    addAppNotification('rating',title,body,{subject:subject,subjects:[subject],scoreChanges:items,bookUrl:selectedBook&&selectedBook.url?selectedBook.url:'',ratingPeriod:normalizeRatingPeriod(ratingPeriod)});
+    ratingNotificationChanges(items).forEach(function(change){
+      let before=cleanLine(change.oldValue||''),after=cleanLine(change.newValue||''),isNew=!ratingIsRealScoreValue(before)&&ratingIsRealScoreValue(after),title=isNew?'Новая оценка':'Изменилась оценка';
+      let scoreText=isNew?(change.label+': '+after):(change.label+': '+(before||'—')+' → '+(after||'—')),body=subject+' · '+scoreText+'.';
+      addAppNotification('rating',title,body,{subject:subject,subjects:[subject],scoreChanges:[change],newSubject:!!change.newSubject,bookUrl:selectedBook&&selectedBook.url?selectedBook.url:'',ratingPeriod:normalizeRatingPeriod(ratingPeriod)});
+    });
   });
 }
 
@@ -859,6 +897,71 @@ function ratingCanonicalYearKey(label){
 function ratingCanonicalSemesterKey(label){
   let t=cleanLine(label||'').toLowerCase().replace(/ё/g,'е');if(/осенн/.test(t))return 'autumn';if(/весенн/.test(t))return 'spring';let m=t.match(/(?:^|\s)([1-9]|i{1,3}|iv)(?:\s|$)/i);return m?String(m[1]).toLowerCase():t;
 }
+function ratingVerifiedCurrentPeriodIds(doc,sourceUrl,years,semesters){
+  let yearCounts=new Map(),semCounts=new Map();
+  function count(map,value){value=String(value||'').trim();if(!value)return;map.set(value,(map.get(value)||0)+1);}
+  // The most reliable source on the group page is the set of actual
+  // personalrating.php links. Unlike the portal's year <option>, these links
+  // must contain the real year id for the rows currently shown.
+  Array.from(doc.querySelectorAll('a[href]')).forEach(function(a){
+    try{
+      let u=new URL(a.getAttribute('href')||'',sourceUrl||RATING_URL);
+      if(!/\/student\/personalrating\.php$/i.test(u.pathname))return;
+      count(yearCounts,u.searchParams.get('year'));count(semCounts,u.searchParams.get('sem'));
+    }catch(e){}
+  });
+  // detailed.php links are a second independent confirmation on a personal page.
+  Array.from(doc.querySelectorAll('a[href]')).forEach(function(a){
+    try{
+      let u=new URL(a.getAttribute('href')||'',sourceUrl||RATING_URL);
+      if(!/\/student\/detailed\.php$/i.test(u.pathname))return;
+      count(yearCounts,u.searchParams.get('year'));count(semCounts,u.searchParams.get('sem'));
+    }catch(e){}
+  });
+  // Some portal controls carry the real selected year only in inline JS.
+  Array.from(doc.querySelectorAll('[onchange],[onclick]')).forEach(function(el){
+    let js=String(el.getAttribute('onchange')||el.getAttribute('onclick')||'');
+    let ym=js.match(/[?&]year=([0-9]{3,})/i),sm=js.match(/[?&](?:sem|semester)=([0-9]+)/i);
+    if(ym)count(yearCounts,ym[1]);if(sm)count(semCounts,sm[1]);
+  });
+  function best(map){let arr=Array.from(map.entries()).sort(function(a,b){return b[1]-a[1]||String(a[0]).localeCompare(String(b[0]));});return arr.length?arr[0][0]:'';}
+  let yearValue=best(yearCounts),semesterValue=best(semCounts),yearLabel='',semesterLabel='';
+  let selectedYear=(years||[]).find(function(o){return o&&o.selected;});
+  let selectedSemester=(semesters||[]).find(function(o){return o&&o.selected;});
+  if(selectedYear)yearLabel=selectedYear.label||'';
+  if(selectedSemester)semesterLabel=selectedSemester.label||'';
+  // Personal rating pages print the current labels as plain text rather than a picker.
+  let visible=ratingPeriodFromVisibleDoc(doc);
+  if(!yearLabel&&visible&&visible.year)yearLabel=visible.year;
+  if(!semesterLabel&&visible&&visible.semester)semesterLabel=visible.semester;
+  try{
+    let u=new URL(sourceUrl||'',RATING_URL);
+    if(!yearValue&&u.searchParams.get('year'))yearValue=String(u.searchParams.get('year'));
+    if(!semesterValue&&u.searchParams.get('sem')!==null)semesterValue=String(u.searchParams.get('sem'));
+  }catch(e){}
+  return {yearValue:yearValue,semesterValue:semesterValue,yearLabel:yearLabel,semesterLabel:semesterLabel};
+}
+function ratingApplyVerifiedPeriodIds(doc,sourceUrl,years,semesters){
+  let hint=ratingVerifiedCurrentPeriodIds(doc,sourceUrl,years,semesters);
+  if(hint.yearValue&&hint.yearLabel&&ratingLooksLikeYearLabel(hint.yearLabel)){
+    let key=ratingCanonicalYearKey(hint.yearLabel),matched=false;
+    years=(years||[]).map(function(o){
+      if(ratingCanonicalYearKey(o.label||'')!==key)return o;
+      matched=true;return Object.assign({},o,{value:String(hint.yearValue),verified:true,mode:'verified'});
+    });
+    if(!matched)years.push({value:String(hint.yearValue),label:ratingCanonicalYearLabel(hint.yearLabel),selected:true,field:'year',url:'',mode:'verified',verified:true});
+  }
+  if(hint.semesterValue&&hint.semesterLabel){
+    let sk=ratingCanonicalSemesterKey(hint.semesterLabel),yk=hint.yearLabel?ratingCanonicalYearKey(hint.yearLabel):'';
+    semesters=(semesters||[]).map(function(o){
+      let sameSem=ratingCanonicalSemesterKey(o.label||o.value||'')===sk;
+      let sameYear=!o.yearLabel||!yk||ratingCanonicalYearKey(o.yearLabel)===yk;
+      return sameSem&&sameYear?Object.assign({},o,{value:String(hint.semesterValue),verified:true,mode:'verified',yearLabel:o.yearLabel||hint.yearLabel||''}):o;
+    });
+  }
+  return {years:years||[],semesters:semesters||[]};
+}
+
 function ratingPeriodOptionRank(o){
   if(!o)return -1;let score=0;if(o.selected)score+=100;if(ratingOptionIsActionable(o))score+=50;let mode=String(o.mode||'').toLowerCase();if(mode==='form'||mode==='url'||mode==='catalog')score+=12;if(mode==='live')score+=8;if(mode!=='filter')score+=4;if(o.field)score+=3;if(o.url)score+=3;if(/^\d{3,}$/.test(String(o.value||'')))score+=2;return score;
 }
@@ -1077,6 +1180,9 @@ function ratingPeriodStateFromDoc(doc,sourceUrl){
   // fallbacks instead of reporting that no variants exist.
   let fallback=ratingMergePeriodOptions(ratingPeriodOptionsFromTables(doc),ratingPeriodOptionsFromVisibleText(doc));
   let merged=ratingMergePeriodOptions({years:years,semesters:semesters},fallback);years=merged.years;semesters=merged.semesters;
+  // v0.43: the portal may expose a wrong duplicate <option value> for a newly added year.
+  // Reconcile it with the year ids actually used by personalrating.php/detailed.php links.
+  let verified=ratingApplyVerifiedPeriodIds(doc,sourceUrl,years,semesters);years=sanitizeRatingPeriodOptions({years:verified.years,semesters:verified.semesters}).years;semesters=sanitizeRatingPeriodOptions({years:verified.years,semesters:verified.semesters}).semesters;
   let sy=selectedFor('year',years),ss=selectedFor('semester',semesters);
   return {years:years,semesters:semesters,selected:{year:sy?sy.value:'',yearLabel:sy?sy.label:'',semester:ss?ss.value:'',semesterLabel:ss?ss.label:''},fields:fields,sourceUrl:sourceUrl};
 }
@@ -1581,6 +1687,23 @@ function ratingSubjectsFromPersonalDom(doc,sourceUrl){
     let discipline=rawLabel;try{let q=new URL(href).searchParams.get('discipline');if(q)discipline=cleanLine(q);}catch(e){}
     let control='',subject=discipline,cm=subject.match(/(?:[,;]\s*|\s+)(зач[её]т(?:\s+с\s+оценкой)?|экзамен|дифференцированн[а-яё]*\s+зач[её]т)\s*$/i);if(cm){control=cleanLine(cm[1]);subject=cleanLine(subject.slice(0,cm.index));}
     let key=normalizeSubject(subject);if(!subject||subject.length<3||seen.has(key))return;
+
+    // v0.43: preserve the real Module 1 / Module 2 / Total column positions.
+    // New-semester portal rows often leave later columns empty; collecting only
+    // non-empty numbers would otherwise shift Module 1 into the Total column.
+    let portalRow=a.closest?a.closest('.ct-action'):null;
+    if(portalRow){
+      let m1El=portalRow.querySelector('.brs-data1'),m2El=portalRow.querySelector('.brs-data2'),totalEl=portalRow.querySelector('.brs-rating');
+      if(m1El||m2El||totalEl){
+        let module1=cleanLine(m1El&&m1El.textContent||''),module2=cleanLine(m2El&&m2El.textContent||''),total=cleanLine(totalEl&&totalEl.textContent||''),details=[];
+        if(control)details.push({label:'Форма контроля',value:control});
+        details.push({label:'Модуль 1',value:module1||'—'});
+        details.push({label:'Модуль 2',value:module2||'—'});
+        details.push({label:'Общий балл',value:total||'—'});
+        seen.add(key);result.push({subject:subject,total:total,totalLabel:'Общий балл',moduleOneTotal:module1,details:details,detailUrl:href});return;
+      }
+    }
+
     let values=[],cur=a.parentElement,best=[];
     for(let depth=0;cur&&depth<7;depth++,cur=cur.parentElement){
       let vals=[];Array.from(cur.querySelectorAll('*')).forEach(function(el){if(el.children&&el.children.length)return;let t=cleanLine(el.textContent||'');if(t&&isScoreValue(t))vals.push(t);});
@@ -1764,7 +1887,7 @@ async function ratingRefreshControlPointsProgressively(data,ctx,baseline,subject
       let item=ratingSubjectItem(data,job.subject);if(item)ratingReplaceModuleOneWithControlPoints(item,points);
       data.detailsPending=true;data.detailsUpdatedAt=new Date().toISOString();writeJson(ctx.cacheKey,data);
       if(ratingContextMatches(ctx)){
-        let live=ratingSubjectItem(ratingData,job.subject);if(live)ratingReplaceModuleOneWithControlPoints(live,points);if(section==='rating')ratingPatchControlPointRows(job.subject,points);
+        let live=ratingSubjectItem(ratingData,job.subject);if(live)ratingReplaceModuleOneWithControlPoints(live,points);if(section==='rating'){ratingPatchControlPointRows(job.subject,points);ratingPatchCardDisplayScore(job.subject,live||item);}
       }
     }
   }
@@ -1785,10 +1908,26 @@ function ratingSubjectsResolved(data){
   let out=regular.slice(),seen=new Set(out.map(x=>normalizeSubject(x.subject)));packed.forEach(function(x){let k=normalizeSubject(x.subject);if(!seen.has(k)){seen.add(k);out.push(x);}});return out;
 }
 
+
+function ratingCardDisplayScore(item){
+  item=item||{};let details=Array.isArray(item.details)?item.details:[],usable=function(v){v=cleanLine(v||'');return !!v&&!/^[—–-]$/.test(v)&&isScoreValue(v);};
+  let total=cleanLine(item.total||'');if(usable(total))return {label:cleanLine(item.totalLabel||'Общий балл')||'Общий балл',value:total};
+  let totalDetail=details.find(function(d){return /^(?:общий\s+балл|итог|итого|рейтинг|результат)$/i.test(cleanLine(d&&d.label||''))&&usable(d&&d.value);});
+  if(totalDetail)return {label:cleanLine(totalDetail.label)||'Общий балл',value:cleanLine(totalDetail.value)};
+  let module1=cleanLine(item.moduleOneTotal||''),m1Detail=details.find(function(d){return /^модуль\s*1$/i.test(cleanLine(d&&d.label||''));});if(!usable(module1)&&m1Detail)module1=cleanLine(m1Detail.value||'');
+  if(usable(module1))return {label:'Модуль 1',value:module1};
+  let nums=[];details.forEach(function(d){if(!/^контрольная\s+точка\s+[1-5]$/i.test(cleanLine(d&&d.label||'')))return;let v=cleanLine(d&&d.value||'');if(usable(v))nums.push(parseFloat(v.replace(',','.')));});
+  if(nums.length){let sum=Math.round(nums.reduce(function(a,b){return a+b;},0)*100)/100;return {label:'Модуль 1',value:(Number.isInteger(sum)?String(sum):String(sum).replace('.',','))};}
+  return {label:cleanLine(item.totalLabel||'Общий балл')||'Общий балл',value:'—'};
+}
+function ratingPatchCardDisplayScore(subject,item){
+  let card=Array.from(document.querySelectorAll('.ratingCard[data-rating-subject]')).find(function(c){return normalizeSubject(c.dataset.ratingSubject||'')===normalizeSubject(subject);});if(!card)return;
+  let score=ratingCardDisplayScore(item),box=card.querySelector('.ratingTotal');if(!box)return;let span=box.querySelector('span'),b=box.querySelector('b');if(span)span.textContent=score.label;if(b)b.textContent=score.value;
+}
 function ratingCardHtml(item,index){
-  let bg=cardColor(item.subject),fg=textColor(bg),subjectMarks=ratingMarksForSubject(item.subject),marked=subjectMarks.length||pendingRatingSubjects.some(x=>normalizeSubject(x)===normalizeSubject(item.subject));
+  let bg=cardColor(item.subject),fg=textColor(bg),subjectMarks=ratingMarksForSubject(item.subject),marked=subjectMarks.length||pendingRatingSubjects.some(x=>normalizeSubject(x)===normalizeSubject(item.subject)),cardScore=ratingCardDisplayScore(item);
   let details=item.details.map(function(d){let total=/(итог|общий|сумм|всего|рейтинг|результат)/i.test(d.label);return '<div class="ratingPoint'+(total?' total':'')+'" data-rating-label="'+esc(d.label)+'" data-rating-value="'+esc(d.value)+'"><span>'+esc(d.label)+'</span><b>'+esc(d.value)+'</b></div>';}).join('');
-  return '<article class="ratingCard" data-rating-subject="'+esc(item.subject)+'" style="--card:'+bg+';--ink:'+fg+'"><button class="ratingCardHead" type="button" data-rating-index="'+index+'" aria-expanded="false"><div class="ratingSubject">'+esc(item.subject)+'</div><div class="ratingTotal"><span>'+esc(item.totalLabel||'Итог')+'</span><b>'+esc(item.total||'—')+'</b></div><svg class="ratingChevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"/></svg>'+(marked?changeDotHtml('cardChangeDot'):'')+'</button><div class="ratingDetails hidden">'+details+'</div></article>';
+  return '<article class="ratingCard" data-rating-subject="'+esc(item.subject)+'" style="--card:'+bg+';--ink:'+fg+'"><button class="ratingCardHead" type="button" data-rating-index="'+index+'" aria-expanded="false"><div class="ratingSubject">'+esc(item.subject)+'</div><div class="ratingTotal"><span>'+esc(cardScore.label)+'</span><b>'+esc(cardScore.value)+'</b></div><svg class="ratingChevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"/></svg>'+(marked?changeDotHtml('cardChangeDot'):'')+'</button><div class="ratingDetails hidden">'+details+'</div></article>';
 }
 function revealRatingScoreMarks(card){
   if(!card)return;let subject=card.dataset.ratingSubject||'',marks=ratingMarksForSubject(subject);if(!marks.length)return;
@@ -2280,7 +2419,7 @@ const CSS=`
 #app[data-theme=dark] .sdoProfile{background:linear-gradient(135deg,#29334b,#3a2f4c);color:#eef2fa}#app[data-theme=dark] .sdoAvatar{background:#1b2029;color:#9dacff}#app[data-theme=dark] .sdoLogout{background:rgba(28,32,42,.68);color:#dce3f0}#app[data-theme=dark] .sdoBlock,#app[data-theme=dark] .sdoLoginCard{background:#1c2028;color:#edf1f7}#app[data-theme=dark] .sdoDeadline,#app[data-theme=dark] .sdoCourseCard,#app[data-theme=dark] .sdoGradeCard{background:#252a34;color:#e7ebf3}#app[data-theme=dark] .sdoCourseIcon{background:#32394c;color:#aebcff}#app[data-theme=dark] .sdoLoginForm input{background:#242933;border-color:#3b424f;color:#f1f4f9}#app[data-theme=dark] .sdoPrivacy{background:#252b36;color:#b7c0cf}#app[data-theme=dark] .sdoPrivacy b{color:#e2e7ef}#app[data-theme=dark] .sdoCourseSection{border-color:#363d49}#app[data-theme=dark] .sdoCourseSection button,#app[data-theme=dark] .sdoCourseGrade{color:#e8edf5;border-color:#323845}
 html.samsung-fold .top{padding-top:max(38px,calc(env(safe-area-inset-top,0px) + 14px))}html.android-edge:not(.samsung-fold) .top{padding-top:max(28px,calc(env(safe-area-inset-top,0px) + 12px))}@media(max-width:390px) and (min-height:700px){.top{padding-top:max(30px,calc(env(safe-area-inset-top,0px) + 12px))}}@media(max-width:360px){.title{font-size:23px}.lesson{grid-template-columns:42px 65px 1fr}.info h3{font-size:15px}.top{padding-left:12px;padding-right:12px}.tabs,.changeBanner{margin-left:12px;margin-right:12px}main{padding-left:11px;padding-right:11px}}
 .ratingControls{display:flex;flex-direction:column;gap:10px;padding:3px 16px 13px}.ratingPeriodControls{display:grid;grid-template-columns:1fr 1fr;gap:9px}.ratingPeriodButton{position:relative;display:grid;grid-template-columns:minmax(0,1fr) 18px;align-items:center;column-gap:8px;min-width:0;min-height:54px;padding:10px 12px;border:0;border-radius:14px;background:#e9edf5;color:#334155;text-align:left;box-shadow:0 2px 7px rgba(45,57,82,.05)}.ratingPeriodButton>strong{grid-column:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:800}.ratingPeriodButton .groupChevron{grid-column:2;width:17px;height:17px}.ratingPeriodButton:active{transform:scale(.985);filter:brightness(.97)}.ratingPeriodPicker{display:flex;flex-direction:column;gap:7px}.ratingPeriodNativeState{min-height:190px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:20px 10px}.ratingPeriodNativeState .emptyTitle{margin-top:10px}.ratingPeriodNativeIcon{width:42px;height:42px;border-radius:14px;display:flex;align-items:center;justify-content:center;background:#e9edf8;color:#5b6fe8;font-size:22px;font-weight:900}.ratingPeriodSpinner{width:34px;height:34px;border-radius:50%;border:3px solid rgba(91,111,232,.18);border-top-color:#5b6fe8;animation:spin .8s linear infinite}#app[data-theme=dark] .ratingPeriodNativeIcon{background:#30374a;color:#c9d2ff}#app[data-theme=dark] .ratingPeriodSpinner{border-color:rgba(201,210,255,.18);border-top-color:#c9d2ff}.ratingPeriodItem{width:100%;display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:48px;padding:11px 13px;border:0;border-radius:14px;background:#f1f3f8;color:#2c3749;text-align:left;font-size:13px;font-weight:780}.ratingPeriodItem.current{background:#e4e9ff;color:#4051ad}.ratingDetails{background:rgba(255,255,255,.24)}#app[data-theme=dark] .ratingPeriodButton{background:#242832;color:#e8edf5}#app[data-theme=dark] .ratingPeriodItem{background:#242933;color:#edf1f7}#app[data-theme=dark] .ratingPeriodItem.current{background:#313a5a;color:#c9d2ff}@media(max-width:370px){.ratingPeriodControls{grid-template-columns:1fr}.ratingCardHead{grid-template-columns:minmax(0,1fr) auto 22px}.ratingTotal b{font-size:19px}}
-/* iPhone / Safari / Home Screen — v0.42 / Vercel */
+/* iPhone / Safari / Home Screen — v0.43 / Vercel */
 @supports (-webkit-touch-callout:none){html,body{overscroll-behavior:none;-webkit-text-size-adjust:100%}#app{min-height:100dvh}.top{padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}.tabs{margin-left:max(16px,env(safe-area-inset-left,0px));margin-right:max(16px,env(safe-area-inset-right,0px))}.navrow{padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}.changeBanner{margin-left:max(16px,env(safe-area-inset-left,0px));margin-right:max(16px,env(safe-area-inset-right,0px))}main,.sdoDashboard{padding-left:max(14px,env(safe-area-inset-left,0px));padding-right:max(14px,env(safe-area-inset-right,0px))}footer{padding-left:max(17px,env(safe-area-inset-left,0px));padding-right:max(17px,env(safe-area-inset-right,0px));padding-bottom:max(12px,env(safe-area-inset-bottom,0px))}.modalBox{padding-bottom:max(16px,calc(env(safe-area-inset-bottom,0px) + 10px))}.notificationPanel{padding-left:max(14px,env(safe-area-inset-left,0px));padding-right:max(14px,env(safe-area-inset-right,0px))}.drawer{padding-left:max(14px,env(safe-area-inset-left,0px))}input,select,textarea{font-size:16px!important}}
 `;
 

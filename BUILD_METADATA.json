@@ -1,5 +1,5 @@
 {
-  "version": "0.42",
+  "version": "0.43",
   "target": "iPhone / Safari / PWA / Vercel",
   "based_on": "MGUU Web v0.33",
   "backend": "Vercel Node.js Function: api/backend.mjs",
@@ -17,10 +17,10 @@
     "GitHub is source repository",
     "Use Vercel deployment URL on iPhone",
     "GitHub Pages remains interface-only fallback",
-    "Rating UI/logic remains synced with Android phone v0.48",
-    "Saved rating book URLs, period/cache references, notification book URLs and detailed.php references are migrated to canonical portal URLs without clearing localStorage",
-    "vercel.json includes a compatibility /student/:path* rewrite to the portal backend so legacy relative links cannot fall through to Vercel 403",
-    "PWA cache/update protections from v0.37 remain enabled",
-    "v0.42 automatically refreshes the available academic-year list from rating.php on app/rating open, foreground return, manual refresh and the existing 2-minute visible-app background cycle; new years are added without changing the selected period or rating display mechanics"
+    "iPhone UI/settings remain native to the Web/PWA branch; Android code was used only as the functional specification",
+    "Rating behavior is synchronized with Android universal v0.54: verified future-year ids, new-semester card headline scores, new-card discovery, and grade-change notifications",
+    "When portal year <option> ids conflict with personalrating.php/detailed.php links, the verified working links win; no year id is hardcoded",
+    "Saved period and rating caches remain in place; the selected year/semester is not auto-switched",
+    "Portal/API traffic remains network-only/no-store and canonical portal URLs remain separate from Vercel transport URLs"
   ]
 }

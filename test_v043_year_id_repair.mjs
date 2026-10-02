@@ -1,0 +1,11 @@
+import fs from 'node:fs';import vm from 'node:vm';
+const app=fs.readFileSync(new URL('./app.js',import.meta.url),'utf8');
+function extract(name){const start=app.indexOf('function '+name+'(');if(start<0)throw new Error('missing '+name);let i=app.indexOf('{',start),d=0,q='',e=false;for(;i<app.length;i++){const c=app[i];if(q){if(e)e=false;else if(c==='\\')e=true;else if(c===q)q='';continue;}if(c==='"'||c==="'"||c==='`'){q=c;continue;}if(c==='{')d++;else if(c==='}'&&--d===0)return app.slice(start,i+1);}throw new Error('unterminated');}
+function must(x,m){if(!x)throw new Error(m)}
+const ctx={console,Array,String,Object};ctx.cleanLine=s=>String(s||'').replace(/\s+/g,' ').trim();ctx.ratingVerifiedCurrentPeriodIds=()=>({yearValue:'000000033',semesterValue:'0',yearLabel:'2026/2027 учебный год',semesterLabel:'Осенний семестр'});ctx.ratingLooksLikeYearLabel=s=>/20\d\d/.test(s);ctx.ratingCanonicalYearLabel=s=>String(s).match(/20\d\d\s*[/–—-]\s*20\d\d/)?.[0].replace(/\s/g,'')||String(s);ctx.ratingCanonicalYearKey=s=>(String(s).match(/20\d\d\s*[/–—-]\s*20\d\d/)?.[0]||String(s)).replace(/\s/g,'');ctx.ratingCanonicalSemesterKey=s=>/осен/i.test(s)?'fall':'spring';vm.createContext(ctx);vm.runInContext(extract('ratingApplyVerifiedPeriodIds'),ctx);
+let years=[{value:'000000015',label:'2025/2026 учебный год'},{value:'000000015',label:'2026/2027 учебный год',selected:true}],sems=[{value:'0',label:'Осенний семестр',selected:true,yearLabel:'2026/2027 учебный год'}];
+let out=ctx.ratingApplyVerifiedPeriodIds({},'https://portal.mguu.ru/student/rating.php',years,sems);let y=out.years.find(x=>/2026\/2027/.test(x.label));must(y&&y.value==='000000033'&&y.verified===true,'duplicate portal year id was not repaired');
+must(/personalrating\.php/.test(extract('ratingVerifiedCurrentPeriodIds'))&&/detailed\.php/.test(extract('ratingVerifiedCurrentPeriodIds')),'verified id sources missing');
+must(app.includes('let verified=ratingApplyVerifiedPeriodIds(doc,sourceUrl,years,semesters);'),'period parser does not apply verified ids');
+if(app.includes('2026/2027 → 000000033')||app.includes("year:'000000033'"))throw new Error('year id must not be hardcoded into app logic');
+console.log('PASS v0.43 year-id repair: malformed duplicate option is replaced by verified working portal id.');

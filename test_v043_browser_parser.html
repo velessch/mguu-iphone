@@ -1,0 +1,58 @@
+<!doctype html><meta charset="utf-8"><div id="fixture"><div class="ct-action"><a href="/student/detailed.php?userid=1&year=000000033&sem=0&disciplineCode=1&discipline=Психология творческого коллектива, Экзамен&controlCode=2">Психология творческого коллектива, Экзамен</a><h5 class="brs-data1">10</h5><h5 class="brs-data2"></h5><h5 class="brs-rating"></h5></div><div class="ct-action"><a href="/student/detailed.php?userid=1&year=000000033&sem=0&disciplineCode=2&discipline=Новая пустая дисциплина, Зачет&controlCode=3">Новая пустая дисциплина, Зачет</a><h5 class="brs-data1"></h5><h5 class="brs-data2"></h5><h5 class="brs-rating"></h5></div></div><pre id="out"></pre><script>
+const RATING_URL='https://portal.mguu.ru/student/rating.php';
+function cleanLine(s){return String(s||'').replace(/\u00a0/g,' ').replace(/\s+/g,' ').trim();}
+function normalizeSubject(s){return cleanLine(s).toLowerCase().replace(/ё/g,'е');}
+function normalizePortalSourceUrl(raw,base){return new URL(raw,base||RATING_URL).href;}
+function ratingSummaryMetricLabels(){return ['Модуль 1','Модуль 2','Общий балл'];}
+function ratingLeafTextNodes(doc){let list=[];Array.from(doc.querySelectorAll('body *')).forEach(function(el){if(el.children&&el.children.length)return;let t=cleanLine(el.textContent||'');if(t)list.push({el:el,text:t});});return list;}
+function isScoreValue(v){let s=cleanLine(v);return /^[-–—]$/.test(s)||/^\d+(?:[.,]\d+)?$/.test(s);}
+function ratingSubjectsFromPersonalDom(doc,sourceUrl){
+  let anchors=Array.from(doc.querySelectorAll('a[href]')).filter(function(a){try{return /\/student\/detailed\.php$/i.test(new URL(normalizePortalSourceUrl(a.getAttribute('href')||'',sourceUrl),RATING_URL).pathname);}catch(e){return false;}});
+  if(!anchors.length)return [];
+  let metricLabels=ratingSummaryMetricLabels(doc),leaves=ratingLeafTextNodes(doc),anchorIndex=new Map(),anchorSet=new Set(anchors);leaves.forEach(function(x,i){let a=null;try{a=x.el&&x.el.tagName==='A'?x.el:(x.el&&x.el.closest?x.el.closest('a[href]'):null);}catch(e){}if(a&&anchorSet.has(a)&&!anchorIndex.has(a))anchorIndex.set(a,i);});
+  let result=[],seen=new Set();
+  anchors.forEach(function(a,ai){
+    let rawLabel=cleanLine(a.textContent||'');if(!rawLabel)return;let href='';try{href=normalizePortalSourceUrl(a.getAttribute('href')||'',sourceUrl);}catch(e){return;}
+    let discipline=rawLabel;try{let q=new URL(href).searchParams.get('discipline');if(q)discipline=cleanLine(q);}catch(e){}
+    let control='',subject=discipline,cm=subject.match(/(?:[,;]\s*|\s+)(зач[её]т(?:\s+с\s+оценкой)?|экзамен|дифференцированн[а-яё]*\s+зач[её]т)\s*$/i);if(cm){control=cleanLine(cm[1]);subject=cleanLine(subject.slice(0,cm.index));}
+    let key=normalizeSubject(subject);if(!subject||subject.length<3||seen.has(key))return;
+
+    // v0.43: preserve the real Module 1 / Module 2 / Total column positions.
+    // New-semester portal rows often leave later columns empty; collecting only
+    // non-empty numbers would otherwise shift Module 1 into the Total column.
+    let portalRow=a.closest?a.closest('.ct-action'):null;
+    if(portalRow){
+      let m1El=portalRow.querySelector('.brs-data1'),m2El=portalRow.querySelector('.brs-data2'),totalEl=portalRow.querySelector('.brs-rating');
+      if(m1El||m2El||totalEl){
+        let module1=cleanLine(m1El&&m1El.textContent||''),module2=cleanLine(m2El&&m2El.textContent||''),total=cleanLine(totalEl&&totalEl.textContent||''),details=[];
+        if(control)details.push({label:'Форма контроля',value:control});
+        details.push({label:'Модуль 1',value:module1||'—'});
+        details.push({label:'Модуль 2',value:module2||'—'});
+        details.push({label:'Общий балл',value:total||'—'});
+        seen.add(key);result.push({subject:subject,total:total,totalLabel:'Общий балл',moduleOneTotal:module1,details:details,detailUrl:href});return;
+      }
+    }
+
+    let values=[],cur=a.parentElement,best=[];
+    for(let depth=0;cur&&depth<7;depth++,cur=cur.parentElement){
+      let vals=[];Array.from(cur.querySelectorAll('*')).forEach(function(el){if(el.children&&el.children.length)return;let t=cleanLine(el.textContent||'');if(t&&isScoreValue(t))vals.push(t);});
+      if(vals.length&&vals.length<=Math.max(8,metricLabels.length+3)){best=vals;if(vals.length>=Math.min(3,metricLabels.length))break;}
+    }
+    values=best;
+    if(!values.length){
+      let start=anchorIndex.has(a)?anchorIndex.get(a):-1,end=leaves.length;
+      for(let j=ai+1;j<anchors.length;j++){let ix=anchorIndex.get(anchors[j]);if(ix!==undefined&&ix>start){end=ix;break;}}
+      if(start>=0){for(let i=start+1;i<end&&values.length<metricLabels.length;i++){let t=leaves[i].text;if(isScoreValue(t))values.push(t);}}
+    }
+    if(!values.length)return;if(values.length>metricLabels.length)values=values.slice(values.length-metricLabels.length);
+    let labels=metricLabels.slice(Math.max(0,metricLabels.length-values.length)),details=[];if(control)details.push({label:'Форма контроля',value:control});
+    values.forEach(function(v,i){details.push({label:labels[i]||('Показатель '+(i+1)),value:v});});
+    let totalDetail=details.find(function(d){return /(итог|общий|сумм|всего|рейтинг|результат)/i.test(d.label);})||details.slice().reverse().find(function(d){return isScoreValue(d.value);});
+    seen.add(key);result.push({subject:subject,total:totalDetail?totalDetail.value:'—',totalLabel:totalDetail?totalDetail.label:'Итог',details:details,detailUrl:href});
+  });
+  return result;
+}
+const items=ratingSubjectsFromPersonalDom(document,'https://portal.mguu.ru/student/personalrating.php?userid=1&year=000000033&sem=0');
+const ok=items.length===2&&items[0].moduleOneTotal==='10'&&items[0].total===''&&items[0].details[1].label==='Модуль 1'&&items[0].details[1].value==='10'&&items[0].details[3].label==='Общий балл'&&items[0].details[3].value==='—'&&items[1].subject==='Новая пустая дисциплина';
+document.getElementById('out').textContent=ok?'PASS_BROWSER_PARSER':'FAIL '+JSON.stringify(items);
+</script>
