@@ -1,9 +1,9 @@
 (function(){
 'use strict';
-if(window.__mguuWebV043){return;}
-window.__mguuWebV043=true;
+if(window.__mguuWebV044){return;}
+window.__mguuWebV044=true;
 
-const APP_VERSION='0.43 Web · Vercel';
+const APP_VERSION='0.44 Web · Vercel';
 const DEFAULT_GROUP={id:'000000230',name:'24ГМУ-СКР11.1'};
 const PORTAL_ORIGIN='https://portal.mguu.ru';
 const PORTAL_RATING_URL=PORTAL_ORIGIN+'/student/rating.php';
@@ -38,7 +38,7 @@ function normalizePortalSourceUrl(value,fallback){
     return u.href;
   }catch(e){return String(value||'');}
 }
-function toPortalProxyUrl(value){
+function toPortalProxyUrl(value,forcePrime){
   try{
     let source=normalizePortalSourceUrl(value,PORTAL_RATING_URL),u=new URL(source,PORTAL_RATING_URL),proxy=null;
     if(u.origin===PORTAL_ORIGIN&&/^\/student\//i.test(u.pathname)){
@@ -54,6 +54,7 @@ function toPortalProxyUrl(value){
     if(/\/student\/(?:personalrating|detailed)\.php$/i.test(proxy.pathname)){
       if(ratingGroup&&ratingGroup.id)proxy.searchParams.set('__mguu_groupid',String(ratingGroup.id));
       if(ratingGroup&&ratingGroup.name)proxy.searchParams.set('__mguu_groupname',String(ratingGroup.name));
+      if(forcePrime)proxy.searchParams.set('__mguu_forceprime','1');
     }
     return proxy.href;
   }catch(e){return String(value||'');}
@@ -85,7 +86,6 @@ const K_NOTIFICATIONS='mguu_v017_notifications';
 const K_NOTIFY_SCHEDULE_SCOPE='mguu_v021_notify_schedule_scope';
 const K_NOTIFY_RATING_SCOPE='mguu_v021_notify_rating_scope';
 const K_PERSONAL_TASKS='mguu_v023_personal_tasks';
-const K_SDO_SNAPSHOT='mguu_v029_sdo_snapshot';
 const MAX_NOTIFICATIONS=100;
 const pastel=['#ffd6e0','#ffe5b4','#fff3b0','#cdeac0','#bde0fe','#cdb4db','#d8e2dc','#fbc4ab','#caffbf','#a0c4ff','#e2cfea','#f1c0e8'];
 const calmPalette=['#E8B7B1','#E2C4A6','#F1D9A6','#D8E7B8','#BFDCC4','#B9DDE1','#BBD1EA','#C9C1E6','#D8C0D7','#E8C5CF','#D8B79F','#C8D2BE','#B9C4D6','#D7DDE8','#E6D5C6','#C7DCC8','#D4C8B5','#C7B9AF','#D9C9E8','#BFD2C1','#E4D7AE','#C9D6A3','#C7DCEF','#D6C7C2'];
@@ -101,7 +101,7 @@ let colors=readJson(K_COLORS,{})||{};
 let colorDraft=null;
 let theme=localStorage.getItem(K_THEME)||((window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light');
 let section=localStorage.getItem(K_SECTION)||'schedule';
-if(section!=='schedule'&&section!=='rating'&&section!=='sdo')section='schedule';
+if(section!=='schedule'&&section!=='rating')section='schedule';
 let selectedBook=null;
 let ratingBooks=[];
 let ratingData=null;
@@ -128,10 +128,6 @@ let splashDismissed=false;
 let splashStartedAt=Date.now();
 let appNotifications=readJson(K_NOTIFICATIONS,[])||[];
 let personalTasks=readJson(K_PERSONAL_TASKS,[])||[];
-let sdoAuthenticated=null;
-let sdoData=null;
-let sdoBusy=false;
-let sdoUser=null;
 let mode='day';
 let allEvents=[];
 let calendarEvents=[];
@@ -157,6 +153,18 @@ function fmtShort(d){return pad(d.getDate())+'.'+pad(d.getMonth()+1)+'.'+d.getFu
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
 function readJson(k,f){try{let v=localStorage.getItem(k);return v?JSON.parse(v):f;}catch(e){return f;}}
 function writeJson(k,v){try{localStorage.setItem(k,JSON.stringify(v));}catch(e){}}
+const K_CLEANUP_V044='mguu_v044_cleanup_done';
+function cleanupRemovedSdoV044(){
+  try{
+    if(localStorage.getItem(K_CLEANUP_V044)==='1')return;
+    // v0.44 removes SDO completely. Purge legacy SDO snapshot/history entries
+    // and ask the Vercel backend to expire the old encrypted HttpOnly cookie.
+    try{localStorage.removeItem('mguu_v029_sdo_snapshot');}catch(e){}
+    appNotifications=(appNotifications||[]).filter(function(n){return n&&n.kind!=='sdo';});saveAppNotifications();
+    fetch(localBackendUrl('api/health?cleanup=1'),{cache:'no-store',credentials:'same-origin'}).catch(function(){});
+    localStorage.setItem(K_CLEANUP_V044,'1');
+  }catch(e){}
+}
 
 const K_PORTAL_URL_MIGRATION_V039='mguu_v039_portal_urls_migrated';
 function normalizeRatingBookRecord(book){
@@ -306,7 +314,7 @@ function updateNotificationBadge(){
 }
 function addAppNotification(kind,title,body,extra){
   extra=extra||{};
-  let noticeGroup=kind==='rating'?ratingGroup:(kind==='sdo'?{id:'sdo',name:'СДО'}:selectedGroup);
+  let noticeGroup=kind==='rating'?ratingGroup:selectedGroup;
   let now=Date.now(),candidate={id:String(now)+'_'+Math.random().toString(36).slice(2,7),kind:kind,title:title,body:body,createdAt:new Date(now).toISOString(),read:false,groupId:noticeGroup.id,groupName:noticeGroup.name,book:selectedBook&&selectedBook.label?selectedBook.label:'',bookUrl:selectedBook&&selectedBook.url?selectedBook.url:'',extra:extra};
   let sig=notificationSignature(candidate),last=(appNotifications||[]).find(n=>notificationSignature(n)===sig&&now-new Date(n.createdAt).getTime()<10*60*1000);
   if(last)return;
@@ -318,10 +326,10 @@ function renderNotificationsPanel(){
   let list=document.getElementById('notificationList');if(!list)return;
   if(!appNotifications.length){list.innerHTML='<div class="notificationEmpty"><div class="notificationEmptyIcon">♡</div><div class="emptyTitle">Уведомлений нет</div></div>';return;}
   list.innerHTML='<div class="notificationCards">'+appNotifications.map(function(n){
-    let isRating=n.kind==='rating',isSdo=n.kind==='sdo';
-    let action=isRating?'Открыть отметку':(isSdo?'Открыть СДО':'Открыть день');
-    let type=isRating?'Рейтинг':(isSdo?'СДО':'Расписание');
-    let cls=isRating?'ratingNotice':(isSdo?'sdoNotice':'scheduleNotice');
+    let isRating=n.kind==='rating';
+    let action=isRating?'Открыть отметку':'Открыть день';
+    let type=isRating?'Рейтинг':'Расписание';
+    let cls=isRating?'ratingNotice':'scheduleNotice';
     return '<button type="button" class="notificationCard '+cls+'" data-notification-id="'+esc(n.id)+'"><div class="notificationType">'+type+'</div><h3>'+esc(n.title)+'</h3><p>'+esc(n.body)+'</p><div class="notificationMeta">'+esc(n.groupName||'')+(n.book?' · '+esc(n.book):'')+'<span>'+esc(formatNotificationTime(n.createdAt))+'</span></div><div class="notificationOpen"><span>'+action+'</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg></div></button>';
   }).join('')+'</div>';
   document.querySelectorAll('.notificationCard[data-notification-id]').forEach(function(card){card.onclick=function(){openNotificationTarget(this.dataset.notificationId);};});
@@ -371,7 +379,7 @@ function openRatingNotification(n){
 function openNotificationTarget(id){
   let n=(appNotifications||[]).find(x=>String(x.id)===String(id));if(!n)return;
   n.read=true;saveAppNotifications();
-  if(n.kind==='rating')openRatingNotification(n);else if(n.kind==='sdo')openSdoNotification(n);else openScheduleNotification(n);
+  if(n.kind==='rating')openRatingNotification(n);else openScheduleNotification(n);
 }
 window.mguuOpenNotification=function(id){openNotificationTarget(id);};
 function scheduleChangeBody(changes){
@@ -436,6 +444,15 @@ function ratingScoreChanges(oldData,newData){
       if(!beforeReal&&!afterReal)return;
       changes.push({subject:item.subject,label:label,oldValue:before,newValue:after,kind:!old?'added-subject':(!beforeReal&&afterReal?'added':'changed'),isTotal:ratingMetricIsTotal(label),isPoint:ratingMetricIsPoint(label),isModuleOne:ratingMetricIsModuleOne(label),isModuleTwo:ratingMetricIsModuleTwo(label),newSubject:!old});
     });
+    // personalrating.php can expose the new Module 1 sum before detailed.php exposes
+    // the exact KT. Treat that summary delta as a real grade event so it cannot be
+    // swallowed by a delayed/temporarily unavailable detail page. If detailed KTs
+    // are available in this same comparison, ratingNotificationChanges() prefers
+    // those specific point changes and suppresses this aggregate fallback.
+    if(old&&oldM1!==newM1){
+      let beforeReal=ratingIsRealScoreValue(oldM1),afterReal=ratingIsRealScoreValue(newM1),already=changes.some(function(ch){return normalizeSubject(ch.subject)===normalizeSubject(item.subject)&&(ch.isModuleOne||ch.isPoint);});
+      if((beforeReal||afterReal)&&!already)changes.push({subject:item.subject,label:'Модуль 1',oldValue:oldM1,newValue:newM1,kind:!beforeReal&&afterReal?'added':'changed',isTotal:false,isPoint:false,isModuleOne:true,isModuleTwo:false,newSubject:false});
+    }
     // Defensive fallback for a new card whose portal markup exposes only summary
     // fields outside the details array. This guarantees that a real first score is
     // not lost just because the new portal row has a slightly different shape.
@@ -703,13 +720,13 @@ function ratingCacheKey(book,period){let p=normalizeRatingPeriod(period||ratingP
 function ratingDetailCacheKey(url){return K_RATING_DETAIL_CACHE_BASE+'_'+hash(String(url||''));}
 function ratingReadDetailCache(url){let v=readJson(ratingDetailCacheKey(url),null);return v&&Array.isArray(v.points)?v:null;}
 function ratingReadDetailPoints(url){let v=ratingReadDetailCache(url);return ratingDetailCacheUsable(v)?v.points:null;}
-function ratingWriteDetailPoints(url,points,recognized){
-  if(!url||!Array.isArray(points))return;
-  let normalized=points.map(function(p,i){return {label:'Контрольная точка '+(i+1),value:cleanLine(p&&p.value||'')||'—'};});
-  writeJson(ratingDetailCacheKey(url),{checkedAt:new Date().toISOString(),recognized:recognized===true||ratingControlPointsHaveValues(normalized),points:normalized});
-}
+function ratingWriteDetailPoints(url,points){if(!url||!Array.isArray(points))return;writeJson(ratingDetailCacheKey(url),{checkedAt:new Date().toISOString(),points:points.map(function(p,i){return {label:'Контрольная точка '+(i+1),value:cleanLine(p&&p.value||'')||'—'};})});}
 function ratingControlPointsHaveValues(points){return Array.isArray(points)&&points.some(function(p){let v=cleanLine(p&&p.value||'');return !!v&&!/^[—–-]$/.test(v);});}
 function ratingDetailCacheUsable(cache){return !!(cache&&Array.isArray(cache.points)&&(cache.recognized===true||ratingControlPointsHaveValues(cache.points)));}
+function ratingControlPointNumericSum(points){let values=[];(points||[]).forEach(function(p){let v=cleanLine(p&&p.value||'');if(!ratingIsRealScoreValue(v))return;let n=ratingNumericScore(v);if(n!==null)values.push(n);});if(!values.length)return null;return Math.round(values.reduce(function(a,b){return a+b;},0)*100)/100;}
+function ratingControlPointsMatchModuleOne(points,item){let moduleOne=ratingModuleOneSignatureValue(item);if(!ratingIsRealScoreValue(moduleOne))return true;let expected=ratingNumericScore(moduleOne),sum=ratingControlPointNumericSum(points);if(expected===null)return ratingControlPointsHaveValues(points);if(expected===0)return sum===null||Math.abs(sum)<=0.001;if(sum===null)return false;return Math.abs(sum-expected)<=0.001;}
+function ratingDetailCacheUsableForItem(url,item){let v=ratingReadDetailCache(url);if(!v)return false;let moduleOne=ratingModuleOneSignatureValue(item);if(!ratingIsRealScoreValue(moduleOne))return true;return ratingControlPointsHaveValues(v.points)&&ratingControlPointsMatchModuleOne(v.points,item);}
+
 const K_RATING_DETAIL_CACHE_REPAIR_V039='mguu_v039_rating_detail_cache_repaired';
 function ratingRepairBrokenDetailCachesV039(){
   try{
@@ -1742,12 +1759,22 @@ function ratingDetailScoreValue(text){
 }
 function ratingModuleOneControlPointsFromDetailDoc(doc){
   let found=new Map();
-  function setPoint(n,value){n=Number(n)||0;value=ratingDetailScoreValue(value);if(n>=1&&n<=5&&value!==''&&!found.has(n))found.set(n,value);}
-  function complete(){return found.size>=5;}
+  function isDash(value){return /^(?:—|–|-)$/.test(cleanLine(value||''));}
+  function setPoint(n,value){
+    n=Number(n)||0;value=ratingDetailScoreValue(value);if(n<1||n>5||value==='')return;
+    let previous=found.get(n);
+    // v0.57: portal detailed.php can contain duplicate responsive/desktop rows.
+    // A placeholder dash from an earlier hidden copy must never block a later
+    // real score for the same checkpoint. A real score is never downgraded to a dash.
+    if(previous===undefined||isDash(previous)&&!isDash(value))found.set(n,value);
+  }
+  // Do not stop scanning merely because all five point labels were seen: some
+  // copies contain five placeholders followed later by the real values.
+  function complete(){for(let n=1;n<=5;n++){if(!found.has(n)||isDash(found.get(n)))return false;}return true;}
   // 1) Ordinary vertical rows: "Контрольная точка 1 | 8".
   Array.from(doc.querySelectorAll('tr')).forEach(function(tr){
     if(complete())return;let cells=Array.from(tr.querySelectorAll('th,td')),texts=cells.map(function(c){return cleanLine(c.textContent||'');});
-    texts.forEach(function(t,i){let n=ratingDetailControlPointNumber(t);if(!n||found.has(n))return;
+    texts.forEach(function(t,i){let n=ratingDetailControlPointNumber(t);if(!n)return;
       let ownTail=t.replace(/.*?(?:кт|контрольн[а-яё]*\s+точк[а-яё]*|точк[а-яё]*)\s*(?:№\s*)?[1-5]/i,'').trim(),own=ratingDetailScoreValue(ownTail);if(own){setPoint(n,own);return;}
       for(let j=i+1;j<texts.length&&j<=i+3;j++){let v=ratingDetailScoreValue(texts[j]);if(v){setPoint(n,v);break;}if(ratingDetailControlPointNumber(texts[j]))break;}
     });
@@ -1768,13 +1795,13 @@ function ratingModuleOneControlPointsFromDetailDoc(doc){
   if(!complete()){
     let leaves=[];Array.from(doc.querySelectorAll('body *')).forEach(function(el){if(el.children&&el.children.length)return;let t=cleanLine(el.textContent||'');if(t)leaves.push(t);});
     for(let i=0;i<leaves.length&&!complete();i++){
-      let n=ratingDetailControlPointNumber(leaves[i]);if(!n||found.has(n))continue;
+      let n=ratingDetailControlPointNumber(leaves[i]);if(!n)continue;
       for(let j=i+1;j<leaves.length&&j<=i+4;j++){if(ratingDetailControlPointNumber(leaves[j]))break;let v=ratingDetailScoreValue(leaves[j]);if(v){setPoint(n,v);break;}}
     }
   }
   // 4) Inputs/data attributes, if the portal renders scores through form controls.
   if(!complete())Array.from(doc.querySelectorAll('input,select,textarea,[data-value],[aria-label],[title]')).forEach(function(el){
-    if(complete())return;let label=[el.getAttribute('aria-label'),el.getAttribute('title'),el.getAttribute('name'),el.getAttribute('id')].filter(Boolean).join(' '),n=ratingDetailControlPointNumber(label);if(!n||found.has(n))return;
+    if(complete())return;let label=[el.getAttribute('aria-label'),el.getAttribute('title'),el.getAttribute('name'),el.getAttribute('id')].filter(Boolean).join(' '),n=ratingDetailControlPointNumber(label);if(!n)return;
     let v=el.value!==undefined?String(el.value||''):String(el.getAttribute('data-value')||el.textContent||'');setPoint(n,v);
   });
   // 5) Some portal tables identify rows only by the point number (1..5), while
@@ -1784,7 +1811,7 @@ function ratingModuleOneControlPointsFromDetailDoc(doc){
     if(complete())return;let all=cleanLine(table.textContent||'');if(!/модуль\s*1/i.test(all))return;
     Array.from(table.querySelectorAll('tr')).forEach(function(tr){if(complete())return;let cells=Array.from(tr.querySelectorAll('th,td')).map(function(c){return cleanLine(c.textContent||'');});if(cells.length<2)return;
       let n=0;for(let i=0;i<Math.min(3,cells.length);i++){let m=cells[i].match(/^(?:кт\s*)?(?:№\s*)?([1-5])(?:\s*(?:контрольн[а-яё]*\s+точк[а-яё]*))?$/i);if(m){n=parseInt(m[1],10);break;}}
-      if(!n||found.has(n))return;for(let j=cells.length-1;j>=0;j--){let v=ratingDetailScoreValue(cells[j]);if(v&&String(v)!==String(n)){setPoint(n,v);break;}}
+      if(!n)return;for(let j=cells.length-1;j>=0;j--){let v=ratingDetailScoreValue(cells[j]);if(v&&String(v)!==String(n)){setPoint(n,v);break;}}
     });
   });
   let out=[];for(let n=1;n<=5;n++)out.push({label:'Контрольная точка '+n,value:found.has(n)?found.get(n):'—'});return out;
@@ -1822,12 +1849,28 @@ async function ratingEnrichModuleOneControlPoints(subjects){
 function ratingDetailDocHasPointStructure(doc){
   let text='';try{text=cleanLine(doc&&doc.body&&doc.body.textContent||'');}catch(e){}return /(?:\bкт|контрольн[а-яё]*\s+точк[а-яё]*|\bточк[а-яё]*)\s*(?:№\s*)?[1-5](?:\b|$)/i.test(text);
 }
-function ratingFetchDetailControlPoints(url){
-  url=String(url||'');if(!url)return Promise.resolve({points:ratingPlaceholderControlPoints(),recognized:false});
-  if(ratingDetailInflight.has(url))return ratingDetailInflight.get(url);
-  let task=(async function(){let r=await fetchRatingResponse(url),points=ratingModuleOneControlPointsFromDetailDoc(r.doc);return {points:points,recognized:ratingDetailDocHasPointStructure(r.doc)};})().finally(function(){ratingDetailInflight.delete(url);});
-  ratingDetailInflight.set(url,task);return task;
+async function ratingFetchDetailResponse(url,forcePrime){
+  let sourceUrl=normalizePortalSourceUrl(url,PORTAL_RATING_URL),transportUrl=toPortalProxyUrl(sourceUrl,!!forcePrime);
+  let r=await fetch(transportUrl,{cache:'no-store',credentials:'same-origin'}),html=await r.text();
+  if(!r.ok){let stage=r.headers.get('x-mguu-portal-stage')||'';throw new Error('Рейтинг вернул '+r.status+(stage?' · '+stage:''));}
+  return {doc:new DOMParser().parseFromString(html,'text/html'),url:sourceUrl,transportUrl:r.url||transportUrl,rendered:false};
 }
+function ratingFetchDetailControlPoints(url,item){
+  url=String(url||'');if(!url)return Promise.resolve({points:ratingPlaceholderControlPoints(),recognized:false,complete:false});
+  let inflightKey=url+'|'+cleanLine(ratingModuleOneSignatureValue(item)||'');
+  if(ratingDetailInflight.has(inflightKey))return ratingDetailInflight.get(inflightKey);
+  let task=(async function(){
+    let r=await ratingFetchDetailResponse(url,false),points=ratingModuleOneControlPointsFromDetailDoc(r.doc),recognized=ratingDetailDocHasPointStructure(r.doc),matches=ratingControlPointsMatchModuleOne(points,item);
+    // v0.44 iPhone parity with Android v0.57: HTTP 200 may still contain a
+    // fallback/partial responsive copy. Force the full Vercel priming chain once.
+    if((!recognized&&!ratingControlPointsHaveValues(points))||!matches){
+      r=await ratingFetchDetailResponse(url,true);points=ratingModuleOneControlPointsFromDetailDoc(r.doc);recognized=ratingDetailDocHasPointStructure(r.doc);matches=ratingControlPointsMatchModuleOne(points,item);
+    }
+    return {points:points,recognized:recognized,complete:matches};
+  })().finally(function(){ratingDetailInflight.delete(inflightKey);});
+  ratingDetailInflight.set(inflightKey,task);return task;
+}
+
 function ratingContextMatches(ctx){
   if(!ctx)return false;let p=normalizeRatingPeriod(ratingPeriod);return String(ratingGroup&&ratingGroup.id||'')===String(ctx.groupId||'')&&String(selectedBook&&selectedBook.url||'')===String(ctx.bookUrl||'')&&String(p.year||'')===String(ctx.period&&ctx.period.year||'')&&String(p.semester||'')===String(ctx.period&&ctx.period.semester||'');
 }
@@ -1859,33 +1902,23 @@ function ratingSummaryChangedSubjects(oldData,newData){
 }
 function ratingDetailSubjectsToRefresh(data,baseline,forceAll){
   let list=ratingSubjectsResolved(data);if(forceAll||!baseline)return list.filter(function(x){return !!x.detailUrl;}).map(function(x){return x.subject;});
-  let changed=new Set(ratingSummaryChangedSubjects(baseline,data).map(normalizeSubject));
-  return list.filter(function(x){
-    if(!x.detailUrl)return false;
-    let cached=ratingReadDetailCache(x.detailUrl);
-    return !ratingDetailCacheUsable(cached)||changed.has(normalizeSubject(x.subject));
-  }).map(function(x){return x.subject;});
+  let changed=new Set(ratingSummaryChangedSubjects(baseline,data).map(normalizeSubject));return list.filter(function(x){return !!x.detailUrl&&(!ratingDetailCacheUsableForItem(x.detailUrl,x)||changed.has(normalizeSubject(x.subject)));}).map(function(x){return x.subject;});
 }
 function ratingSeedDetailPointsFromCache(data,baseline){
-  if(!baseline)return data;ratingSubjectsResolved(data).forEach(function(item){
-    if(!item||!item.detailUrl||ratingDetailCacheUsable(ratingReadDetailCache(item.detailUrl)))return;
-    let old=ratingSubjectItem(baseline,item.subject),points=ratingControlPointsFromItem(old);
-    if(!points||!ratingControlPointsHaveValues(points))return;
-    ratingWriteDetailPoints(item.detailUrl,points,true);ratingReplaceModuleOneWithControlPoints(item,points);
-  });return data;
+  if(!baseline)return data;ratingSubjectsResolved(data).forEach(function(item){if(!item||!item.detailUrl||ratingReadDetailCache(item.detailUrl))return;let old=ratingSubjectItem(baseline,item.subject),points=ratingControlPointsFromItem(old);if(!points)return;if(ratingIsRealScoreValue(ratingModuleOneSignatureValue(item))&&!ratingControlPointsHaveValues(points))return;ratingWriteDetailPoints(item.detailUrl,points);ratingReplaceModuleOneWithControlPoints(item,points);});return data;
 }
 function ratingPatchControlPointRows(subject,points){
   let card=Array.from(document.querySelectorAll('.ratingCard[data-rating-subject]')).find(function(c){return normalizeSubject(c.dataset.ratingSubject||'')===normalizeSubject(subject);});if(!card)return;
   (points||[]).slice(0,5).forEach(function(p,i){let label='Контрольная точка '+(i+1),row=Array.from(card.querySelectorAll('.ratingPoint')).find(function(r){return normalizeSubject(r.dataset.ratingLabel||'')===normalizeSubject(label);});if(!row)return;let value=cleanLine(p&&p.value||'')||'—',b=row.querySelector('b');row.dataset.ratingValue=value;if(b)b.textContent=value;});
 }
 async function ratingRefreshControlPointsProgressively(data,ctx,baseline,subjectsToRefresh){
-  let wanted=Array.isArray(subjectsToRefresh)?new Set(subjectsToRefresh.map(normalizeSubject)):null,list=ratingSubjectsResolved(data),jobs=list.map(function(item){return {subject:item.subject,url:String(item&&item.detailUrl||'')};}).filter(function(j){return !!j.url&&(!wanted||wanted.has(normalizeSubject(j.subject)));}),cursor=0,run=++ratingDetailRunSeq;
+  let wanted=Array.isArray(subjectsToRefresh)?new Set(subjectsToRefresh.map(normalizeSubject)):null,list=ratingSubjectsResolved(data),jobs=list.map(function(item){return {subject:item.subject,url:String(item&&item.detailUrl||''),item:item};}).filter(function(j){return !!j.url&&(!wanted||wanted.has(normalizeSubject(j.subject)));}),cursor=0,run=++ratingDetailRunSeq;
   async function worker(){
-    while(cursor<jobs.length){let job=jobs[cursor++],result=null;try{result=await ratingFetchDetailControlPoints(job.url);}catch(e){continue;}
+    while(cursor<jobs.length){let job=jobs[cursor++],result=null;try{result=await ratingFetchDetailControlPoints(job.url,job.item);}catch(e){continue;}
       let previous=ratingReadDetailCache(job.url);if(!result||(!result.recognized&&!ratingControlPointsHaveValues(result.points)))continue;
-      let points=result.points||ratingPlaceholderControlPoints();ratingWriteDetailPoints(job.url,points,!!result.recognized);
+      let points=result.points||ratingPlaceholderControlPoints();ratingWriteDetailPoints(job.url,points);
       let item=ratingSubjectItem(data,job.subject);if(item)ratingReplaceModuleOneWithControlPoints(item,points);
-      data.detailsPending=true;data.detailsUpdatedAt=new Date().toISOString();writeJson(ctx.cacheKey,data);
+      data.detailsPending=true;data.detailsUpdatedAt=new Date().toISOString();if(result&&!result.complete)data.detailsPartial=true;
       if(ratingContextMatches(ctx)){
         let live=ratingSubjectItem(ratingData,job.subject);if(live)ratingReplaceModuleOneWithControlPoints(live,points);if(section==='rating'){ratingPatchControlPointRows(job.subject,points);ratingPatchCardDisplayScore(job.subject,live||item);}
       }
@@ -1974,7 +2007,7 @@ async function loadRating(forceDetails){
     ratingPeriod=sanitizeRatingPeriod(data.period);ratingPeriodOptions=sanitizeRatingPeriodOptions(data.periodOptions||{years:[],semesters:[]});ratingStoreAvailablePeriods(ratingPeriodOptions);ratingPeriodCatalog=Array.isArray(data.periodCatalog)?data.periodCatalog:[];saveRatingPeriod();
     let finalKey=ratingCacheKey(selectedBook,ratingPeriod),oldData=readJson(finalKey,null)||baseline;if(oldData)ratingRepairControlPointDuplicatesInData(oldData);ratingSeedDetailPointsFromCache(data,oldData);ratingRepairControlPointDuplicatesInData(data);
     let notifyScope=ratingNotificationScope(selectedBook),scopeChanged=localStorage.getItem(K_NOTIFY_RATING_SCOPE)!==notifyScope;localStorage.setItem(K_NOTIFY_RATING_SCOPE,notifyScope);
-    let detailSubjects=ratingDetailSubjectsToRefresh(data,oldData,!!forceDetails);data.detailsPending=detailSubjects.length>0;ratingData=data;writeJson(finalKey,data);renderRating();
+    let detailSubjects=ratingDetailSubjectsToRefresh(data,oldData,!!forceDetails);data.detailsPending=detailSubjects.length>0;ratingData=data;if(!detailSubjects.length||!oldData)writeJson(finalKey,data);renderRating();
     let suffix=[ratingPeriod.yearLabel,ratingPeriod.semesterLabel].filter(Boolean).join(' · ');
     if(!detailSubjects.length){data.detailsPending=false;data.detailsLoadedAt=new Date().toISOString();writeJson(finalKey,data);setStatus('Рейтинг актуален'+(suffix?' · '+suffix:'')+' · '+new Date().toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}));if(!scopeChanged){let changed=ratingScoreChanges(oldData,data);if(changed.length)addRatingChangeNotifications(changed,data);}return;}
     setStatus('Рейтинг загружен'+(suffix?' · '+suffix:'')+' · уточняем изменившиеся оценки в фоне');
@@ -2005,7 +2038,7 @@ async function checkRatingInBackground(force){
   try{
     let data=await fetchRatingData(selectedBook);if(requestGroup!==String(ratingGroup.id||'')||requestBookUrl!==String(selectedBook&&selectedBook.url||''))return;let current=normalizeRatingPeriod(ratingPeriod);if(String(current.year||'')!==String(requestPeriod.year||'')||String(current.semester||'')!==String(requestPeriod.semester||''))return;
     let actualPeriod=sanitizeRatingPeriod(data.period||requestPeriod),finalKey=ratingCacheKey(selectedBook,actualPeriod),baseline=readJson(finalKey,null)||oldData;if(baseline)ratingRepairControlPointDuplicatesInData(baseline);ratingSeedDetailPointsFromCache(data,baseline);ratingRepairControlPointDuplicatesInData(data);
-    let notifyScope=ratingNotificationScope(selectedBook),scopeChanged=localStorage.getItem(K_NOTIFY_RATING_SCOPE)!==notifyScope;localStorage.setItem(K_NOTIFY_RATING_SCOPE,notifyScope);let detailSubjects=ratingDetailSubjectsToRefresh(data,baseline,!!force);data.detailsPending=detailSubjects.length>0;writeJson(finalKey,data);
+    let notifyScope=ratingNotificationScope(selectedBook),scopeChanged=localStorage.getItem(K_NOTIFY_RATING_SCOPE)!==notifyScope;localStorage.setItem(K_NOTIFY_RATING_SCOPE,notifyScope);let detailSubjects=ratingDetailSubjectsToRefresh(data,baseline,!!force);data.detailsPending=detailSubjects.length>0;if(!detailSubjects.length||!baseline)writeJson(finalKey,data);
     if(section==='rating'&&ratingContextMatches({groupId:requestGroup,bookUrl:requestBookUrl,period:actualPeriod})){ratingData=data;ratingPeriod=actualPeriod;ratingPeriodOptions=sanitizeRatingPeriodOptions(data.periodOptions||ratingPeriodOptions);ratingStoreAvailablePeriods(ratingPeriodOptions);ratingPeriodCatalog=Array.isArray(data.periodCatalog)?data.periodCatalog:[];saveRatingPeriod();renderRating();}
     if(!detailSubjects.length){if(!scopeChanged){let changed=ratingScoreChanges(baseline,data);if(changed.length&&ratingContextMatches({groupId:requestGroup,bookUrl:requestBookUrl,period:actualPeriod}))addRatingChangeNotifications(changed,data);}return;}
     let ctx={groupId:requestGroup,bookUrl:requestBookUrl,period:actualPeriod,cacheKey:finalKey,scopeChanged:scopeChanged};ratingRefreshControlPointsProgressively(data,ctx,baseline,detailSubjects);
@@ -2092,99 +2125,6 @@ function selectRatingGroup(id,name){
 }
 
 
-function sdoExternalUrl(path){
-  try{return new URL(path||'/',(sdoData&&sdoData.siteUrl)||'https://online.mguu.ru/').href;}catch(e){return 'https://online.mguu.ru/';}
-}
-async function sdoApi(url,options){
-  let target=/^https?:/i.test(String(url||''))?String(url):localBackendUrl(String(url||'').replace(/^\/+/,''));
-  let response=await fetch(target,Object.assign({credentials:'same-origin',cache:'no-store',headers:{'accept':'application/json'}},options||{}));
-  let data=null;try{data=await response.json();}catch(e){}
-  if(!response.ok||!data||data.ok===false){let err=new Error(data&&data.error?data.error:'Ошибка соединения с СДО');err.status=response.status;err.code=data&&data.code||'';throw err;}
-  return data;
-}
-function sdoDate(value,withTime){
-  let n=Number(value)||0;if(!n)return 'Срок не указан';
-  try{return new Date(n*1000).toLocaleString('ru-RU',withTime?{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}:{day:'2-digit',month:'long',year:'numeric'});}catch(e){return '';}
-}
-function sdoLoginHtml(message){
-  return '<div class="sdoLoginWrap"><div class="sdoLoginCard"><div class="sdoSeal"><img src="./emblem.png" alt="МГУУ"></div><h2>Вход в СДО</h2><p>Используйте логин и пароль от официальной системы дистанционного обучения МГУУ.</p>'+(message?'<div class="sdoError">'+esc(message)+'</div>':'')+'<form id="sdoLoginForm" class="sdoLoginForm"><label>Логин<input id="sdoLoginName" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required></label><label>Пароль<div class="sdoPassword"><input id="sdoLoginPassword" name="password" type="password" autocomplete="current-password" required><button id="sdoPasswordToggle" type="button" aria-label="Показать пароль">○</button></div></label><button id="sdoLoginButton" class="primary" type="submit">Войти</button></form><div class="sdoPrivacy"><b>Безопасность</b>Пароль передаётся только для получения токена Moodle и не сохраняется. Токен хранится в зашифрованной HttpOnly-сессии.</div><button id="sdoOpenOfficial" class="secondary sdoOfficial" type="button">Открыть официальный сайт СДО</button></div></div>';
-}
-function bindSdoLogin(){
-  let form=document.getElementById('sdoLoginForm');if(form)form.onsubmit=loginSdo;
-  let toggle=document.getElementById('sdoPasswordToggle');if(toggle)toggle.onclick=function(){let input=document.getElementById('sdoLoginPassword');if(!input)return;input.type=input.type==='password'?'text':'password';this.textContent=input.type==='password'?'○':'●';};
-  let open=document.getElementById('sdoOpenOfficial');if(open)open.onclick=function(){window.open('https://online.mguu.ru/','_blank','noopener');};
-}
-function renderSdoLogin(message){let content=document.getElementById('sdoContent');if(!content)return;content.innerHTML=sdoLoginHtml(message);bindSdoLogin();}
-function sdoUpcomingItems(data){
-  let now=Math.floor(Date.now()/1000)-12*60*60,items=[];
-  (data.assignments||[]).forEach(function(a){if(!a.dueDate||a.dueDate>=now)items.push({kind:'Задание',name:a.name,course:a.courseName,time:a.dueDate,url:a.url});});
-  (data.calendarEvents||[]).forEach(function(e){if(e.timeStart>=now)items.push({kind:e.moduleName==='assign'?'Задание':'Событие',name:e.name,course:'',time:e.timeStart,url:e.url});});
-  let seen=new Set();return items.sort(function(a,b){return (a.time||9e15)-(b.time||9e15);}).filter(function(x){let k=[x.name,x.course,x.time].join('|');if(seen.has(k))return false;seen.add(k);return true;}).slice(0,12);
-}
-function sdoSnapshot(data){
-  return {assignments:(data.assignments||[]).map(function(a){return {id:String(a.id||a.cmid||a.name),name:a.name,course:a.courseName,due:Number(a.dueDate)||0};}),grades:(data.grades||[]).map(function(g){return {id:String(g.courseId||g.courseName),course:g.courseName,grade:String(g.grade||'')};})};
-}
-function notifySdoChanges(data){
-  let next=sdoSnapshot(data),old=readJson(K_SDO_SNAPSHOT,null);writeJson(K_SDO_SNAPSHOT,next);if(!old)return;
-  let oldA=new Map((old.assignments||[]).map(function(x){return [x.id,x];}));
-  next.assignments.forEach(function(a){if(!oldA.has(a.id))addAppNotification('sdo','Новое задание',a.course+' · '+a.name+(a.due?' · до '+sdoDate(a.due,true):''),{section:'assignments',itemId:a.id});});
-  let oldG=new Map((old.grades||[]).map(function(x){return [x.id,x.grade];}));
-  next.grades.forEach(function(g){if(oldG.has(g.id)&&oldG.get(g.id)!==g.grade)addAppNotification('sdo','Изменилась оценка',g.course+' · '+oldG.get(g.id)+' → '+g.grade,{section:'grades',courseId:g.id});});
-}
-function renderSdoDashboard(data){
-  let content=document.getElementById('sdoContent');if(!content)return;
-  let upcoming=sdoUpcomingItems(data),courses=data.courses||[],grades=data.grades||[],partial=data.partial||{};
-  let warning=(partial.assignments||partial.calendar||partial.grades)?'<div class="sdoWarning">Часть данных СДО недоступна через мобильный API. Курсы и доступные сведения всё равно показаны.</div>':'';
-  let upcomingHtml=upcoming.length?upcoming.map(function(x){return '<button class="sdoDeadline" data-sdo-url="'+esc(x.url||'')+'"><span class="sdoDeadlineDate">'+esc(x.time?sdoDate(x.time,true):'Без срока')+'</span><b>'+esc(x.name)+'</b><span>'+esc(x.course||x.kind)+'</span></button>';}).join(''):'<div class="sdoEmpty">Ближайших заданий и событий нет</div>';
-  let coursesHtml=courses.length?courses.map(function(c){let progress=Number.isFinite(c.progress)?'<span class="sdoProgress"><i style="width:'+Math.max(0,Math.min(100,c.progress))+'%"></i></span><small>'+Math.round(c.progress)+'% выполнено</small>':'';return '<button class="sdoCourseCard" data-sdo-course="'+c.id+'"><div class="sdoCourseIcon">▤</div><div><b>'+esc(c.fullName)+'</b>'+(c.shortName?'<span>'+esc(c.shortName)+'</span>':'')+progress+'</div><svg viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></svg></button>';}).join(''):'<div class="sdoEmpty">Доступных курсов пока нет</div>';
-  let gradesHtml=grades.length?grades.map(function(g){return '<button class="sdoGradeCard" data-sdo-url="'+esc(g.url||'')+'"><span>'+esc(g.courseName)+'</span><b>'+esc(g.grade||'—')+'</b></button>';}).join(''):'<div class="sdoEmpty">Общая ведомость оценок недоступна или пока пуста</div>';
-  content.innerHTML='<div class="sdoDashboard"><section class="sdoProfile"><div class="sdoAvatar">'+esc((data.user&&data.user.fullName||'С').trim().slice(0,1).toUpperCase())+'</div><div><span>СДО МГУУ</span><b>'+esc(data.user&&data.user.fullName||'Студент')+'</b><small>Обновлено '+esc(new Date(data.updatedAt||Date.now()).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'}))+'</small></div><button id="sdoLogout" class="sdoLogout">Выйти</button></section>'+warning+'<section class="sdoBlock"><div class="sdoBlockTitle"><h2>Ближайшее</h2><span>'+upcoming.length+'</span></div><div class="sdoDeadlineList">'+upcomingHtml+'</div></section><section class="sdoBlock"><div class="sdoBlockTitle"><h2>Мои курсы</h2><span>'+courses.length+'</span></div><div class="sdoCourseList">'+coursesHtml+'</div></section><section class="sdoBlock"><div class="sdoBlockTitle"><h2>Оценки</h2><span>'+grades.length+'</span></div><div class="sdoGradeList">'+gradesHtml+'</div></section><button id="sdoOfficialDashboard" class="secondary sdoOfficial" type="button">Открыть официальный сайт СДО</button></div>';
-  document.querySelectorAll('[data-sdo-url]').forEach(function(b){b.onclick=function(){if(this.dataset.sdoUrl)window.open(this.dataset.sdoUrl,'_blank','noopener');};});
-  document.querySelectorAll('[data-sdo-course]').forEach(function(b){b.onclick=function(){openSdoCourse(Number(this.dataset.sdoCourse),this.querySelector('b')?this.querySelector('b').textContent:'Курс');};});
-  let logout=document.getElementById('sdoLogout');if(logout)logout.onclick=logoutSdo;
-  let official=document.getElementById('sdoOfficialDashboard');if(official)official.onclick=function(){window.open(data.siteUrl||'https://online.mguu.ru/','_blank','noopener');};
-}
-function renderSdoLoading(text){let content=document.getElementById('sdoContent');if(content)content.innerHTML='<div class="sdoLoading"><div class="sdoSpinner"></div><b>'+esc(text||'Загрузка СДО...')+'</b></div>';}
-async function loginSdo(event){
-  event.preventDefault();if(sdoBusy)return;
-  let username=document.getElementById('sdoLoginName'),password=document.getElementById('sdoLoginPassword'),button=document.getElementById('sdoLoginButton');if(!username||!password)return;
-  sdoBusy=true;if(button){button.disabled=true;button.textContent='Вход...';}setStatus('Вход в СДО...');
-  try{let result=await sdoApi('/api/sdo/login',{method:'POST',headers:{'content-type':'application/json','accept':'application/json'},body:JSON.stringify({username:username.value.trim(),password:password.value})});password.value='';sdoAuthenticated=true;sdoUser=result.user||null;setStatus('Вход выполнен');await loadSdo(true);}
-  catch(err){password.value='';sdoAuthenticated=false;renderSdoLogin(err.message||'Не удалось войти');setStatus('Не удалось войти в СДО');}
-  finally{sdoBusy=false;}
-}
-async function logoutSdo(){
-  if(sdoBusy)return;sdoBusy=true;setStatus('Выход из СДО...');
-  try{await sdoApi('/api/sdo/logout',{method:'POST',headers:{'content-type':'application/json'},body:'{}'});}catch(e){}
-  sdoAuthenticated=false;sdoData=null;sdoUser=null;renderSdoLogin('Вы вышли из СДО');setStatus('Выход выполнен');sdoBusy=false;
-}
-async function loadSdo(force){
-  if(sdoBusy&&!force)return;
-  let content=document.getElementById('sdoContent');if(!content)return;
-  sdoBusy=true;renderSdoLoading(sdoAuthenticated===null?'Проверяем вход...':'Загружаем курсы...');setBusy(true);setStatus('Загрузка СДО...');
-  try{
-    if(sdoAuthenticated===null){let status=await sdoApi('/api/sdo/status');sdoAuthenticated=!!status.authenticated;sdoUser=status.user||null;}
-    if(!sdoAuthenticated){renderSdoLogin();setStatus('Войдите в СДО');return;}
-    let result=await sdoApi('/api/sdo/dashboard');sdoData=result.data;sdoAuthenticated=true;sdoUser=sdoData.user||sdoUser;notifySdoChanges(sdoData);renderSdoDashboard(sdoData);setStatus('СДО обновлена');
-  }catch(err){
-    if(err.status===401){sdoAuthenticated=false;sdoData=null;renderSdoLogin('Сеанс закончился. Войдите снова.');}
-    else if(sdoData){renderSdoDashboard(sdoData);setStatus('СДО не обновилась — показаны последние данные');}
-    else renderSdoLogin(err.message||'Не удалось загрузить СДО');
-  }finally{sdoBusy=false;setBusy(false);}
-}
-async function openSdoCourse(courseId,title){
-  if(!courseId)return;openModal(title||'Курс','<div class="sdoLoading modalSdoLoading"><div class="sdoSpinner"></div><b>Загрузка курса...</b></div>');
-  try{
-    let result=await sdoApi('/api/sdo/course?courseid='+encodeURIComponent(courseId)),data=result.data,sections=data.sections||[],grades=data.gradeItems||[];
-    let sectionsHtml=sections.length?sections.map(function(sec){return '<div class="sdoCourseSection"><h3>'+esc(sec.name||'Раздел')+'</h3>'+(sec.summary?'<p>'+esc(sec.summary)+'</p>':'')+(sec.modules||[]).map(function(m){return '<button data-sdo-url="'+esc(m.url||'')+'"><span><b>'+esc(m.name)+'</b><small>'+esc(m.moduleName||'Материал')+'</small></span><svg viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></svg></button>';}).join('')+'</div>';}).join(''):'<div class="sdoEmpty">Материалы курса недоступны через мобильный API</div>';
-    let gradesHtml=grades.length?'<div class="sdoCourseSection"><h3>Оценки курса</h3>'+grades.map(function(g){return '<div class="sdoCourseGrade"><span>'+esc(g.name)+'</span><b>'+esc(g.grade||'—')+(g.percentage?' · '+esc(g.percentage):'')+'</b></div>';}).join('')+'</div>':'';
-    document.getElementById('modalBody').innerHTML='<div class="sdoCourseModal">'+sectionsHtml+gradesHtml+'<button id="sdoCourseOfficial" class="primary">Открыть курс в СДО</button></div>';
-    document.querySelectorAll('#modalBody [data-sdo-url]').forEach(function(b){b.onclick=function(){window.open(this.dataset.sdoUrl,'_blank','noopener');};});
-    let official=document.getElementById('sdoCourseOfficial');if(official)official.onclick=function(){window.open(data.url||sdoExternalUrl('/course/view.php?id='+courseId),'_blank','noopener');};
-  }catch(err){let body=document.getElementById('modalBody');if(body)body.innerHTML='<div class="empty"><div class="emptyTitle">Курс не загрузился</div><div class="muted">'+esc(err.message||'Проверьте интернет')+'</div><button id="sdoCourseFallback" class="primary">Открыть на сайте СДО</button></div>';let fallback=document.getElementById('sdoCourseFallback');if(fallback)fallback.onclick=function(){window.open(sdoExternalUrl('/course/view.php?id='+courseId),'_blank','noopener');};}
-}
-function openSdoNotification(){section='sdo';localStorage.setItem(K_SECTION,section);closeNotificationsPanel();applySection();loadSdo(false);}
-
 function installShell(){
   const ua=navigator.userAgent||'';
   const androidMatch=/Android\s+(\d+)/i.exec(ua);
@@ -2199,7 +2139,7 @@ function installShell(){
     <div id="drawerShade" class="drawerShade"></div>
     <aside id="drawer" class="drawer" aria-label="Разделы приложения">
       <div class="drawerTop"><div class="drawerBrand">МГУУ</div><button id="drawerClose" class="close" aria-label="Закрыть меню"><svg class="btnSvg closeSvg" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
-      <nav class="drawerNav"><button class="drawerItem" data-section="schedule"><span class="drawerIcon">▦</span><span>Расписание занятий</span></button><button class="drawerItem" data-section="rating"><span class="drawerIcon">★</span><span>Рейтинг</span></button><button class="drawerItem" data-section="sdo"><span class="drawerIcon">◉</span><span>СДО</span></button></nav>
+      <nav class="drawerNav"><button class="drawerItem" data-section="schedule"><span class="drawerIcon">▦</span><span>Расписание занятий</span></button><button class="drawerItem" data-section="rating"><span class="drawerIcon">★</span><span>Рейтинг</span></button></nav>
       <div class="drawerBottom"><button id="notificationBell" class="bellButton" aria-label="Уведомления"><svg class="btnSvg bellSvg" viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M10 21h4"/></svg><span id="notificationBadge" class="notificationBadge hidden">0</span></button></div>
     </aside>
     <header class="top"><div class="heading"><div id="mainTitle" class="title">Расписание занятий</div><button id="groupSelect" class="groupButton" title="Выбрать учебную группу"><span id="groupName">${esc(groupLabel())}</span><svg class="groupChevron" viewBox="0 0 24 24"><path d="m7 10 5 5 5-5"/></svg></button></div><div class="topBtns"><button id="refresh" class="icon" title="Обновить"><svg class="btnSvg refreshSvg" viewBox="0 0 24 24"><path d="M20 5v5h-5"/><path d="M19.2 10A7.5 7.5 0 1 0 20 15"/></svg></button><button id="palette" class="icon" title="Цвета"><svg class="btnSvg paletteSvg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path class="paletteFill" d="M12 4a8 8 0 0 0 0 16Z"/></svg></button><button id="theme" class="icon" title="Тема"><svg class="btnSvg themeMoon" viewBox="0 0 24 24"><path d="M20 15.2A8 8 0 0 1 8.8 4 8.3 8.3 0 1 0 20 15.2Z"/></svg><svg class="btnSvg themeSun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.5"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></button></div></header>
@@ -2219,7 +2159,6 @@ function installShell(){
       </section>
       <main id="ratingContent"><div class="loading">Загрузка рейтинга...</div></main>
     </div>
-    <div id="sdoView" class="hidden"><main id="sdoContent"><div class="sdoLoading"><div class="sdoSpinner"></div><b>Загрузка СДО...</b></div></main></div>
     <footer><span id="status">${esc(lastStatus)}</span><span>v${APP_VERSION}</span></footer>
     <div id="modal" class="modal hidden"><div class="modalBox"><div class="modalHead"><b id="modalTitle"></b><button id="modalClose" class="close"><svg class="btnSvg closeSvg" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div><div id="modalBody"></div></div></div>
     <section id="notificationPanel" class="notificationPanel hidden" aria-label="Уведомления"><header class="notificationHead"><button id="notificationClose" class="close"><svg class="btnSvg closeSvg" viewBox="0 0 24 24"><path d="m15 5-7 7 7 7"/></svg></button><h2>Уведомления</h2><button id="notificationSettings" class="close" aria-label="Настройки уведомлений"><svg class="btnSvg settingsSvg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6V21h-4v-.1a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H3v-4h.1a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.6V3h4v.1a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.1v4H21a1.7 1.7 0 0 0-1.6 1Z"/></svg></button></header><div class="notificationPermission"><button id="notificationEnable" class="primary">Разрешить системные уведомления</button><button id="notificationDeviceSettings" class="secondary">Настройки устройства</button></div><div id="notificationList" class="notificationList"></div><div class="notificationFooter"><button id="notificationClear" class="secondary">Очистить историю</button></div></section>
@@ -2246,7 +2185,7 @@ function bindUi(){
   document.querySelectorAll('.tabs button').forEach(b=>b.onclick=function(){let m=b.dataset.mode;if(m==='calendar'){openPeriodPicker();return;}setMode(m);});
   document.getElementById('prev').onclick=()=>movePeriod(-1);
   document.getElementById('next').onclick=()=>movePeriod(1);
-  document.getElementById('refresh').onclick=()=>section==='rating'?(refreshRatingAvailablePeriods(true),loadRating(true)):(section==='sdo'?loadSdo(false):loadMain(false));
+  document.getElementById('refresh').onclick=()=>section==='rating'?(refreshRatingAvailablePeriods(true),loadRating(true)):loadMain(false);
   document.getElementById('groupSelect').onclick=()=>section==='rating'?openRatingGroups():openGroups();
   document.getElementById('bookSelect').onclick=openRatingBooks;
   document.getElementById('ratingYear').onclick=function(){openRatingPeriodPicker('year');};
@@ -2273,18 +2212,17 @@ function bindDrawerGestures(){
   document.addEventListener('touchend',function(e){if(!tracking)return;tracking=false;let t=e.changedTouches&&e.changedTouches[0];if(!t)return;let dx=t.clientX-sx,dy=t.clientY-sy;if(Math.abs(dx)<50||Math.abs(dx)<Math.abs(dy)*1.2)return;if(dx>0&&!opened)openDrawer();if(dx<0&&opened)closeDrawer();},{passive:true});
 }
 function setSection(next){
-  if(next!=='schedule'&&next!=='rating'&&next!=='sdo')return;section=next;localStorage.setItem(K_SECTION,section);closeDrawer();applySection();
+  if(next!=='schedule'&&next!=='rating')return;section=next;localStorage.setItem(K_SECTION,section);closeDrawer();applySection();
   if(section==='rating'){loadRatingBooks();return;}
-  if(section==='sdo'){loadSdo(false);return;}
   calendarEvents=[];calendarRange=null;lastRange=null;mode='day';selectedDate=today();weekDate=startOfWeek(selectedDate);
   document.querySelectorAll('.tabs button').forEach(b=>b.classList.toggle('active',b.dataset.mode==='day'));let nav=document.querySelector('.navrow');if(nav)nav.classList.remove('hidden');
   let cache=readGroupJson(K_CACHE_BASE,null);allEvents=cache&&cache.events?cache.events:[];render();setStatus(allEvents.length?'Показана сохранённая версия группы '+groupLabel():'Загрузка расписания группы '+groupLabel()+'...');loadMain(false);
 }
 function applySection(){
-  let schedule=document.getElementById('scheduleView'),rating=document.getElementById('ratingView'),sdo=document.getElementById('sdoView'),palette=document.getElementById('palette'),title=document.getElementById('mainTitle'),groupSelect=document.getElementById('groupSelect');
-  if(!schedule||!rating||!sdo)return;
-  let isRating=section==='rating',isSdo=section==='sdo';
-  schedule.classList.toggle('hidden',isRating||isSdo);rating.classList.toggle('hidden',!isRating);sdo.classList.toggle('hidden',!isSdo);palette.classList.toggle('hidden',isRating||isSdo);groupSelect.classList.toggle('hidden',isSdo);title.textContent=isSdo?'СДО':(isRating?'Рейтинг студентов':'Расписание занятий');
+  let schedule=document.getElementById('scheduleView'),rating=document.getElementById('ratingView'),palette=document.getElementById('palette'),title=document.getElementById('mainTitle'),groupSelect=document.getElementById('groupSelect');
+  if(!schedule||!rating)return;
+  let isRating=section==='rating';
+  schedule.classList.toggle('hidden',isRating);rating.classList.toggle('hidden',!isRating);palette.classList.toggle('hidden',isRating);groupSelect.classList.remove('hidden');title.textContent=isRating?'Рейтинг студентов':'Расписание занятий';
   document.querySelectorAll('.drawerItem').forEach(b=>b.classList.toggle('active',b.dataset.section===section));updateGroupButton();updateBookButton();if(isRating)updateRatingPeriodControls();
 }
 function setMode(m){mode=m;document.querySelectorAll('.tabs button').forEach(b=>b.classList.toggle('active',b.dataset.mode===m));document.querySelector('.navrow').classList.toggle('hidden',m==='calendar');render();}
@@ -2354,7 +2292,7 @@ function render(){
   bindPersonalTaskControls();bindLessonCards();
 }
 function cardHtml(e){let bg=cardColor(e.subject),fg=textColor(bg),marked=pendingScheduleMatch(e);return `<button type="button" class="lesson lessonButton${marked?' notificationChanged':''}" data-lesson-subject="${esc(e.subject)}" data-lesson-date="${esc(e.date)}" style="--card:${bg};--ink:${fg}"><div class="pair"><b>${esc(e.pair)}</b><span>пара</span></div><div class="time">${esc(e.time).replace(' - ','<br>')}</div><div class="info"><h3>${esc(e.subject)}</h3>${e.type?'<div class="type">'+esc(e.type)+'</div>':''}<div class="meta">${e.teacher?'<span>'+esc(e.teacher)+'</span>':''}${e.room?'<span>'+esc(e.room)+'</span>':''}</div></div>${marked?changeDotHtml('cardChangeDot'):''}</button>`;}
-function showError(msg){let c=document.getElementById('content'),extra=IS_GITHUB_PAGES?'<div class="muted" style="margin-top:10px">Интерфейс запущен с GitHub Pages. GitHub Pages показывает только интерфейс. Для расписания, рейтинга и СДО откройте опубликованный адрес Vercel этого проекта.</div>':'';if(c)c.innerHTML='<div class="empty"><div class="emptyTitle">Расписание не загрузилось</div><div class="muted">'+esc(msg)+'</div>'+extra+'<button id="retry" class="primary">Повторить</button></div>';let b=document.getElementById('retry');if(b)b.onclick=()=>loadMain(false);}
+function showError(msg){let c=document.getElementById('content'),extra=IS_GITHUB_PAGES?'<div class="muted" style="margin-top:10px">Интерфейс запущен с GitHub Pages. GitHub Pages показывает только интерфейс. Для расписания и рейтинга откройте опубликованный адрес Vercel этого проекта.</div>':'';if(c)c.innerHTML='<div class="empty"><div class="emptyTitle">Расписание не загрузилось</div><div class="muted">'+esc(msg)+'</div>'+extra+'<button id="retry" class="primary">Повторить</button></div>';let b=document.getElementById('retry');if(b)b.onclick=()=>loadMain(false);}
 
 function openModal(title,html){document.getElementById('modalTitle').textContent=title;document.getElementById('modalBody').innerHTML=html;document.getElementById('modal').classList.remove('hidden');}
 function closeModal(){document.getElementById('modal').classList.add('hidden');}
@@ -2415,12 +2353,10 @@ const CSS=`
 
 .pwaInstallHint{position:fixed;left:12px;right:12px;bottom:max(12px,env(safe-area-inset-bottom,0px));z-index:95;display:flex;align-items:center;gap:10px;padding:11px 12px;border-radius:16px;background:rgba(255,255,255,.97);color:#253047;box-shadow:0 8px 28px rgba(28,36,56,.18);font-size:12px;line-height:1.35}.pwaInstallHint b{display:block;font-size:13px}.pwaInstallHint button{margin-left:auto;flex:0 0 auto;border:0;border-radius:12px;background:#e9edf5;color:#253047;padding:9px 11px;font-weight:800}.pwaInstallHint.hidden{display:none}#app[data-theme=dark] .pwaInstallHint{background:rgba(28,32,40,.98);color:#edf1f7}#app[data-theme=dark] .pwaInstallHint button{background:#303642;color:#edf1f7}
 
-.sdoDashboard{padding:0 14px 24px;display:flex;flex-direction:column;gap:13px}.sdoProfile{display:grid;grid-template-columns:52px minmax(0,1fr) auto;align-items:center;gap:11px;padding:14px;border-radius:19px;background:linear-gradient(135deg,#dfe7ff,#f2e8ff);color:#273450;box-shadow:0 5px 16px rgba(47,61,98,.09)}.sdoAvatar{width:52px;height:52px;display:flex;align-items:center;justify-content:center;border-radius:17px;background:#fff;color:#586bd5;font-size:23px;font-weight:900;box-shadow:0 3px 10px rgba(48,60,96,.12)}.sdoProfile div:nth-child(2){display:flex;min-width:0;flex-direction:column}.sdoProfile span,.sdoProfile small{font-size:11px;opacity:.72}.sdoProfile b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:16px;margin:2px 0}.sdoLogout{border:0;border-radius:12px;padding:9px 10px;background:rgba(255,255,255,.72);color:#4b5b79;font-weight:800}.sdoWarning{padding:11px 13px;border-radius:14px;background:#fff1d7;color:#765223;font-size:12px;line-height:1.4}.sdoBlock{padding:13px;border-radius:19px;background:#fff;box-shadow:0 4px 14px rgba(40,50,70,.07)}.sdoBlockTitle{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}.sdoBlockTitle h2{margin:0;font-size:18px}.sdoBlockTitle span{min-width:26px;padding:4px 7px;border-radius:999px;background:#edf0fa;color:#586bd5;text-align:center;font-size:11px;font-weight:850}.sdoDeadlineList,.sdoCourseList,.sdoGradeList{display:flex;flex-direction:column;gap:8px}.sdoDeadline{display:grid;grid-template-columns:92px minmax(0,1fr);gap:2px 10px;width:100%;padding:11px;border:0;border-radius:14px;background:#f5f6fa;color:#273142;text-align:left}.sdoDeadlineDate{grid-row:1/3;align-self:center;color:#6c7bdd;font-size:11px;font-weight:800}.sdoDeadline b{font-size:13px;line-height:1.3}.sdoDeadline span:last-child{color:#7b8495;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sdoCourseCard{display:grid;grid-template-columns:40px minmax(0,1fr) 20px;align-items:center;gap:10px;width:100%;padding:11px;border:0;border-radius:15px;background:#f5f6fa;color:#273142;text-align:left}.sdoCourseIcon{width:40px;height:40px;display:flex;align-items:center;justify-content:center;border-radius:13px;background:#e6ebff;color:#6175df;font-size:20px}.sdoCourseCard>div:nth-child(2){min-width:0;display:flex;flex-direction:column;gap:3px}.sdoCourseCard b{font-size:13px;line-height:1.28}.sdoCourseCard span,.sdoCourseCard small{color:#7b8495;font-size:10px}.sdoCourseCard svg,.sdoCourseSection button svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round}.sdoProgress{height:5px!important;display:block;margin-top:3px;border-radius:999px;background:#e1e5ee;overflow:hidden}.sdoProgress i{display:block;height:100%;border-radius:999px;background:#7285ef}.sdoGradeCard{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;padding:11px 12px;border:0;border-radius:14px;background:#f5f6fa;color:#273142;text-align:left}.sdoGradeCard span{font-size:12px;font-weight:700}.sdoGradeCard b{font-size:17px;color:#7d57ae}.sdoOfficial{width:100%;min-height:46px}.sdoEmpty{padding:18px 10px;color:#8992a3;text-align:center;font-size:12px}.sdoLoading{min-height:55vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;color:#6c7586}.sdoSpinner{width:30px;height:30px;border:3px solid #d9deea;border-top-color:#7285ef;border-radius:50%;animation:sdoSpin .85s linear infinite}@keyframes sdoSpin{to{transform:rotate(360deg)}}.sdoLoginWrap{padding:18px 14px 28px}.sdoLoginCard{max-width:470px;margin:0 auto;padding:20px 16px;border-radius:23px;background:#fff;box-shadow:0 7px 24px rgba(37,49,76,.1)}.sdoSeal{display:flex;justify-content:center}.sdoSeal img{width:92px;height:92px;object-fit:contain}.sdoLoginCard h2{margin:10px 0 7px;text-align:center}.sdoLoginCard>p{margin:0 auto 17px;max-width:330px;color:#6f798b;text-align:center;font-size:13px;line-height:1.45}.sdoLoginForm{display:flex;flex-direction:column;gap:12px}.sdoLoginForm label{display:flex;flex-direction:column;gap:6px;color:#596477;font-size:12px;font-weight:800}.sdoLoginForm input{width:100%;box-sizing:border-box;padding:13px 12px;border:1px solid #d9dee8;border-radius:13px;background:#f8f9fb;color:#202938;font-size:16px;outline:none}.sdoLoginForm input:focus{border-color:#7b8ced;box-shadow:0 0 0 3px rgba(114,133,239,.14)}.sdoPassword{position:relative}.sdoPassword input{padding-right:47px}.sdoPassword button{position:absolute;right:4px;top:4px;bottom:4px;width:39px;border:0;border-radius:10px;background:transparent;color:#6f7de0;font-size:19px}.sdoPrivacy{margin:14px 0 11px;padding:11px;border-radius:13px;background:#f1f4fb;color:#6b7587;font-size:11px;line-height:1.45}.sdoPrivacy b{display:block;color:#4d5b73}.sdoError{margin-bottom:12px;padding:10px 11px;border-radius:12px;background:#ffe8e6;color:#9b332d;font-size:12px;line-height:1.4}.sdoCourseModal{display:flex;flex-direction:column;gap:12px}.sdoCourseSection{overflow:hidden;border:1px solid #e5e8ef;border-radius:15px}.sdoCourseSection h3{margin:0;padding:12px 12px 8px;font-size:15px}.sdoCourseSection>p{margin:0;padding:0 12px 10px;color:#737d8e;font-size:11px;line-height:1.4}.sdoCourseSection button{width:100%;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:11px 12px;border:0;border-top:1px solid #eef0f4;background:transparent;color:#263142;text-align:left}.sdoCourseSection button span{display:flex;flex-direction:column;gap:3px}.sdoCourseSection button b{font-size:12px}.sdoCourseSection button small{color:#8891a1}.sdoCourseGrade{display:flex;justify-content:space-between;gap:10px;padding:10px 12px;border-top:1px solid #eef0f4;font-size:12px}.sdoCourseGrade b{color:#7d57ae}.modalSdoLoading{min-height:240px}.notificationCard.sdoNotice{border-left-color:#3f9b7a}.sdoNotice .notificationType,.sdoNotice .notificationOpen{color:#2f8d6c}
-#app[data-theme=dark] .sdoProfile{background:linear-gradient(135deg,#29334b,#3a2f4c);color:#eef2fa}#app[data-theme=dark] .sdoAvatar{background:#1b2029;color:#9dacff}#app[data-theme=dark] .sdoLogout{background:rgba(28,32,42,.68);color:#dce3f0}#app[data-theme=dark] .sdoBlock,#app[data-theme=dark] .sdoLoginCard{background:#1c2028;color:#edf1f7}#app[data-theme=dark] .sdoDeadline,#app[data-theme=dark] .sdoCourseCard,#app[data-theme=dark] .sdoGradeCard{background:#252a34;color:#e7ebf3}#app[data-theme=dark] .sdoCourseIcon{background:#32394c;color:#aebcff}#app[data-theme=dark] .sdoLoginForm input{background:#242933;border-color:#3b424f;color:#f1f4f9}#app[data-theme=dark] .sdoPrivacy{background:#252b36;color:#b7c0cf}#app[data-theme=dark] .sdoPrivacy b{color:#e2e7ef}#app[data-theme=dark] .sdoCourseSection{border-color:#363d49}#app[data-theme=dark] .sdoCourseSection button,#app[data-theme=dark] .sdoCourseGrade{color:#e8edf5;border-color:#323845}
 html.samsung-fold .top{padding-top:max(38px,calc(env(safe-area-inset-top,0px) + 14px))}html.android-edge:not(.samsung-fold) .top{padding-top:max(28px,calc(env(safe-area-inset-top,0px) + 12px))}@media(max-width:390px) and (min-height:700px){.top{padding-top:max(30px,calc(env(safe-area-inset-top,0px) + 12px))}}@media(max-width:360px){.title{font-size:23px}.lesson{grid-template-columns:42px 65px 1fr}.info h3{font-size:15px}.top{padding-left:12px;padding-right:12px}.tabs,.changeBanner{margin-left:12px;margin-right:12px}main{padding-left:11px;padding-right:11px}}
 .ratingControls{display:flex;flex-direction:column;gap:10px;padding:3px 16px 13px}.ratingPeriodControls{display:grid;grid-template-columns:1fr 1fr;gap:9px}.ratingPeriodButton{position:relative;display:grid;grid-template-columns:minmax(0,1fr) 18px;align-items:center;column-gap:8px;min-width:0;min-height:54px;padding:10px 12px;border:0;border-radius:14px;background:#e9edf5;color:#334155;text-align:left;box-shadow:0 2px 7px rgba(45,57,82,.05)}.ratingPeriodButton>strong{grid-column:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:800}.ratingPeriodButton .groupChevron{grid-column:2;width:17px;height:17px}.ratingPeriodButton:active{transform:scale(.985);filter:brightness(.97)}.ratingPeriodPicker{display:flex;flex-direction:column;gap:7px}.ratingPeriodNativeState{min-height:190px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:20px 10px}.ratingPeriodNativeState .emptyTitle{margin-top:10px}.ratingPeriodNativeIcon{width:42px;height:42px;border-radius:14px;display:flex;align-items:center;justify-content:center;background:#e9edf8;color:#5b6fe8;font-size:22px;font-weight:900}.ratingPeriodSpinner{width:34px;height:34px;border-radius:50%;border:3px solid rgba(91,111,232,.18);border-top-color:#5b6fe8;animation:spin .8s linear infinite}#app[data-theme=dark] .ratingPeriodNativeIcon{background:#30374a;color:#c9d2ff}#app[data-theme=dark] .ratingPeriodSpinner{border-color:rgba(201,210,255,.18);border-top-color:#c9d2ff}.ratingPeriodItem{width:100%;display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:48px;padding:11px 13px;border:0;border-radius:14px;background:#f1f3f8;color:#2c3749;text-align:left;font-size:13px;font-weight:780}.ratingPeriodItem.current{background:#e4e9ff;color:#4051ad}.ratingDetails{background:rgba(255,255,255,.24)}#app[data-theme=dark] .ratingPeriodButton{background:#242832;color:#e8edf5}#app[data-theme=dark] .ratingPeriodItem{background:#242933;color:#edf1f7}#app[data-theme=dark] .ratingPeriodItem.current{background:#313a5a;color:#c9d2ff}@media(max-width:370px){.ratingPeriodControls{grid-template-columns:1fr}.ratingCardHead{grid-template-columns:minmax(0,1fr) auto 22px}.ratingTotal b{font-size:19px}}
-/* iPhone / Safari / Home Screen — v0.43 / Vercel */
-@supports (-webkit-touch-callout:none){html,body{overscroll-behavior:none;-webkit-text-size-adjust:100%}#app{min-height:100dvh}.top{padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}.tabs{margin-left:max(16px,env(safe-area-inset-left,0px));margin-right:max(16px,env(safe-area-inset-right,0px))}.navrow{padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}.changeBanner{margin-left:max(16px,env(safe-area-inset-left,0px));margin-right:max(16px,env(safe-area-inset-right,0px))}main,.sdoDashboard{padding-left:max(14px,env(safe-area-inset-left,0px));padding-right:max(14px,env(safe-area-inset-right,0px))}footer{padding-left:max(17px,env(safe-area-inset-left,0px));padding-right:max(17px,env(safe-area-inset-right,0px));padding-bottom:max(12px,env(safe-area-inset-bottom,0px))}.modalBox{padding-bottom:max(16px,calc(env(safe-area-inset-bottom,0px) + 10px))}.notificationPanel{padding-left:max(14px,env(safe-area-inset-left,0px));padding-right:max(14px,env(safe-area-inset-right,0px))}.drawer{padding-left:max(14px,env(safe-area-inset-left,0px))}input,select,textarea{font-size:16px!important}}
+/* iPhone / Safari / Home Screen — v0.44 / Vercel */
+@supports (-webkit-touch-callout:none){html,body{overscroll-behavior:none;-webkit-text-size-adjust:100%}#app{min-height:100dvh}.top{padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}.tabs{margin-left:max(16px,env(safe-area-inset-left,0px));margin-right:max(16px,env(safe-area-inset-right,0px))}.navrow{padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}.changeBanner{margin-left:max(16px,env(safe-area-inset-left,0px));margin-right:max(16px,env(safe-area-inset-right,0px))}main{padding-left:max(14px,env(safe-area-inset-left,0px));padding-right:max(14px,env(safe-area-inset-right,0px))}footer{padding-left:max(17px,env(safe-area-inset-left,0px));padding-right:max(17px,env(safe-area-inset-right,0px));padding-bottom:max(12px,env(safe-area-inset-bottom,0px))}.modalBox{padding-bottom:max(16px,calc(env(safe-area-inset-bottom,0px) + 10px))}.notificationPanel{padding-left:max(14px,env(safe-area-inset-left,0px));padding-right:max(14px,env(safe-area-inset-right,0px))}.drawer{padding-left:max(14px,env(safe-area-inset-left,0px))}input,select,textarea{font-size:16px!important}}
 `;
 
 document.addEventListener('click',function(ev){
@@ -2434,11 +2370,12 @@ migrateRatingPortalUrlsV039();
 ratingRepairBrokenDetailCachesV039();
 ratingRepairBrokenDetailCachesV040();
 ratingRepairAllCachedControlPointsV048();
+cleanupRemovedSdoV044();
 nativeNotificationAction('ready');
 let cache=readGroupJson(K_CACHE_BASE,null);if(cache&&cache.events&&cache.events.length){allEvents=cache.events;lastRange={start:cache.start,end:cache.end};render();setStatus('Показана сохранённая версия, проверяем обновления...');setTimeout(dismissSplash,1050);}else if(selectedGroup.id===DEFAULT_GROUP.id&&initialEvents.length){allEvents=initialEvents;render();setTimeout(dismissSplash,1050);}
 updateBanner();
 startRatingBackgroundChecks();
 setTimeout(dismissSplash,4500);
-if(section==='rating')loadRatingBooks();else if(section==='sdo')loadSdo(false);else loadMain(true);
+if(section==='rating')loadRatingBooks();else loadMain(true);
 handlePwaNotificationLink();
 })();

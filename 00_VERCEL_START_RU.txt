@@ -1,21 +1,9 @@
-МГУУ Web v0.43 — iPhone / Vercel
+МГУУ Web v0.44 — iPhone / Vercel
 
-ЭТОТ АРХИВ ПОДГОТОВЛЕН ДЛЯ VERCEL.
-
-1. Распакуйте ZIP.
-2. В GitHub удалите/замените старые файлы проекта файлами из этого архива.
-3. В корне репозитория должны быть index.html, app.js, vercel.json, package.json и папка api.
-4. Откройте Vercel → Add New → Project → Import Git Repository.
-5. Выберите ваш репозиторий МГУУ.
-6. Framework Preset: Other. Остальные Build Settings оставьте по умолчанию.
-7. Нажмите Deploy.
-8. После первого Deploy откройте Project → Settings → Environment Variables.
-9. Создайте переменную MGUU_SESSION_SECRET со случайной длинной строкой (не публикуйте её в GitHub). Отметьте Production и Preview.
-10. Сделайте Redeploy.
-11. Проверьте адрес https://ВАШ-ПРОЕКТ.vercel.app/api/health — должен вернуться JSON с version 0.43 и sessionSecretConfigured true.
-12. Откройте основной адрес Vercel на iPhone в Safari.
-13. Safari → Поделиться → На экран Домой → Открывать как веб-приложение.
-
-Важно: пароль СДО не сохраняется. Он используется серверной функцией только для получения Moodle-токена.
-
-Примечание v0.43: в vercel.json нет ручного блока functions; Vercel автоматически обнаруживает api/backend.mjs.
+1. Замените содержимое репозитория файлами из этого пакета.
+2. Сделайте commit/push в GitHub.
+3. Дождитесь нового deployment в Vercel.
+4. Environment Variables для v0.44 не требуются.
+5. Проверьте https://ВАШ-ПРОЕКТ.vercel.app/api/health — version должен быть 0.44, ratingProxy=true, sdo=false.
+6. На iPhone откройте Vercel URL в Safari.
+7. Для установленной PWA полностью закройте приложение и откройте снова, чтобы Service Worker 044 активировался.

@@ -1,0 +1,44 @@
+МГУУ Web / iPhone v0.44 — финальная проверка
+Дата сборки: 2026-10-08
+База: Web/iPhone v0.43 + подтверждённая на Android Universal v0.57 логика рейтинга
+
+ПРОВЕРЕНО
+- JavaScript syntax: app.js — OK
+- JavaScript syntax: api/backend.mjs — OK
+- JavaScript syntax: sw.js — OK
+- JSON: manifest.webmanifest / vercel.json / package.json / BUILD_METADATA.json — OK
+- PWA build/cache: 044 / mguu-web-v044-vercel — OK
+- Service Worker удаляет предыдущие mguu-web-* cache — OK
+- portal/api responses идут network-only/no-store — OK
+- package не содержит .env, signing keys, паролей или приватных ключей — OK
+- SDO UI/client/API удалены; оставлена только одноразовая очистка старого cookie/local data — OK
+
+РЕЙТИНГ
+- Канонические portal.mguu.ru URL в состоянии приложения — OK
+- Vercel proxy сохраняет контекст группы — OK
+- detailed.php поддерживает forced full priming — OK
+- real KT заменяет более ранний dash из responsive duplicate markup — OK
+- partial detail cache отклоняется, если сумма КТ не совпадает с Module 1 — OK
+- summary-first notification detection — OK
+- новый baseline не записывается до обработки ожидаемых details — OK
+- восстановленная КТ после старого dash создаёт одно rating change event — OK
+
+REGRESSION TESTS
+- test_v040_control_points.mjs — PASS
+- test_v040_detail_loader_state.mjs — PASS
+- test_v040_detailed_proxy.mjs — PASS
+- test_v040_portal_proxy.mjs — PASS
+- test_v042_year_discovery.mjs — PASS
+- test_v042_year_refresh_execution.mjs — PASS
+- test_v043_cache_upgrade.mjs (v0.44 assertions) — PASS
+- test_v043_rating_sync.mjs — PASS
+- test_v043_url_routing.mjs (v0.44 assertions) — PASS
+- test_v043_year_id_repair.mjs — PASS
+- test_v044_forced_prime.mjs — PASS
+- test_v044_sdo_removed.mjs — PASS
+- test_v044_rating_cache.cjs — PASS
+- test_v044_rating_notifications.cjs — PASS
+- test_v044_rating_parser.cjs — PASS
+
+ОГРАНИЧЕНИЕ ПРОВЕРКИ
+Реальный ответ portal.mguu.ru для конкретной зачётки и фактический запуск PWA на физическом iPhone из этой среды не воспроизводились. После deployment нужен тест на устройстве. Серверного push нет: проверка новых оценок выполняется, когда PWA активно или возвращается в работу.
