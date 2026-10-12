@@ -1,9 +1,9 @@
-МГУУ Web v0.44 — iPhone / Vercel
+МГУУ Web v0.45 — iPhone / Vercel
 
 1. Замените содержимое репозитория файлами из этого пакета.
 2. Сделайте commit/push в GitHub.
 3. Дождитесь нового deployment в Vercel.
-4. Environment Variables для v0.44 не требуются.
-5. Проверьте https://ВАШ-ПРОЕКТ.vercel.app/api/health — version должен быть 0.44, ratingProxy=true, sdo=false.
+4. Environment Variables для v0.45 не требуются.
+5. Проверьте https://ВАШ-ПРОЕКТ.vercel.app/api/health — version должен быть 0.45, ratingProxy=true, sdo=false.
 6. На iPhone откройте Vercel URL в Safari.
-7. Для установленной PWA полностью закройте приложение и откройте снова, чтобы Service Worker 044 активировался.
+7. Для установленной PWA полностью закройте приложение и откройте снова, чтобы Service Worker 045 активировался.

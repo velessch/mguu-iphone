@@ -1,0 +1,45 @@
+МГУУ Web / iPhone v0.45 — финальная проверка
+
+Сборка:
+- APP_VERSION: 0.45 Web · Vercel — OK
+- Backend /api/health version: 0.45 — OK
+- PWA build/cache: 045 / mguu-web-v045-vercel — OK
+- manifest start_url: ?v=045 — OK
+
+Исправление учебного периода:
+- учебные годы идентифицируются в UI по каноническому ключу года, не по portal-ID — OK
+- два года с одинаковым portal-ID не получают две галочки — OK
+- выбор 2025/2026 при совпадающем portal-ID не выбирает 2026/2027 — OK
+- сырое дублирующееся portal-value не принимается как однозначный выбор — OK
+- cache/notification scope различает логические годы даже при совпавшем portal-ID — OK
+- повреждённый v0.44 catalog с дублирующимися ID очищается одноразовой миграцией — OK
+
+Регрессии:
+- расписание/группы — код не изменялся
+- рейтинг и КТ v0.44 / Android v0.57 parity — тесты PASS
+- detailed.php Vercel priming — PASS
+- уведомления рейтинга — PASS
+- СДО остаётся удалённым — PASS
+- portal URL routing — PASS
+- динамическое добавление учебных годов — PASS
+
+Автоматические тесты:
+- test_v040_control_points.mjs — PASS
+- test_v040_detail_loader_state.mjs — PASS
+- test_v040_detailed_proxy.mjs — PASS
+- test_v040_portal_proxy.mjs — PASS
+- test_v042_year_discovery.mjs — PASS
+- test_v042_year_refresh_execution.mjs — PASS
+- test_v043_cache_upgrade.mjs (v0.45 assertions) — PASS
+- test_v043_rating_sync.mjs — PASS
+- test_v043_url_routing.mjs (v0.45 assertions) — PASS
+- test_v043_year_id_repair.mjs — PASS
+- test_v044_forced_prime.mjs — PASS
+- test_v044_sdo_removed.mjs — PASS
+- test_v044_rating_cache.cjs — PASS
+- test_v044_rating_notifications.cjs — PASS
+- test_v044_rating_parser.cjs — PASS
+- test_v045_period_identity.mjs — PASS
+
+Ограничение проверки:
+Физический запуск на iPhone и реальный ответ портала для пользовательской зачётки должны быть подтверждены после deployment на Vercel.

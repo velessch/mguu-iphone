@@ -1,9 +1,9 @@
 (function(){
 'use strict';
-if(window.__mguuWebV044){return;}
-window.__mguuWebV044=true;
+if(window.__mguuWebV045){return;}
+window.__mguuWebV045=true;
 
-const APP_VERSION='0.44 Web · Vercel';
+const APP_VERSION='0.45 Web · Vercel';
 const DEFAULT_GROUP={id:'000000230',name:'24ГМУ-СКР11.1'};
 const PORTAL_ORIGIN='https://portal.mguu.ru';
 const PORTAL_RATING_URL=PORTAL_ORIGIN+'/student/rating.php';
@@ -166,6 +166,38 @@ function cleanupRemovedSdoV044(){
   }catch(e){}
 }
 
+
+const K_PERIOD_IDENTITY_REPAIR_V045='mguu_v045_period_identity_repaired';
+function repairRatingPeriodIdentityV045(){
+  try{
+    if(localStorage.getItem(K_PERIOD_IDENTITY_REPAIR_V045)==='1')return;
+    let keys=[];for(let i=0;i<localStorage.length;i++)keys.push(localStorage.key(i));
+    let ambiguousByGroup=new Map();
+    keys.forEach(function(key){
+      if(!key||key.indexOf(K_RATING_AVAILABLE_PERIODS_BASE+'_')!==0)return;
+      let saved=readJson(key,null),opts=saved&&saved.options?saved.options:saved,years=opts&&Array.isArray(opts.years)?opts.years:[],byValue=new Map();
+      years.forEach(function(o){
+        let value=String(o&&o.value||''),label=cleanLine(o&&o.label||'');if(!value||!ratingLooksLikeYearLabel(label))return;
+        let set=byValue.get(value)||new Set();set.add(ratingCanonicalYearKey(label));byValue.set(value,set);
+      });
+      let ambiguous=new Set();byValue.forEach(function(set,value){if(set.size>1)ambiguous.add(value);});
+      if(!ambiguous.size)return;
+      let groupId=key.slice((K_RATING_AVAILABLE_PERIODS_BASE+'_').length);ambiguousByGroup.set(groupId,ambiguous);
+      // Remove only the broken period-option catalog. It will be rebuilt from
+      // the portal on the next rating open; schedules, books and grades stay.
+      try{localStorage.removeItem(key);}catch(e){}
+    });
+    ambiguousByGroup.forEach(function(values,groupId){
+      let prefix=K_RATING_PERIOD_BASE+'_'+groupId+'_';
+      keys.forEach(function(key){
+        if(!key||key.indexOf(prefix)!==0)return;let p=readJson(key,null);if(!p||!values.has(String(p.year||'')))return;
+        writeJson(key,{year:'',yearLabel:'',semester:'',semesterLabel:''});
+      });
+    });
+    localStorage.setItem(K_PERIOD_IDENTITY_REPAIR_V045,'1');
+  }catch(e){}
+}
+
 const K_PORTAL_URL_MIGRATION_V039='mguu_v039_portal_urls_migrated';
 function normalizeRatingBookRecord(book){
   if(!book||typeof book!=='object')return book;
@@ -241,7 +273,7 @@ function migrateRatingPortalUrlsV039(){
         return false;
       });
       if(mapping&&(period.year||period.semester)){
-        let newKey=K_RATING_CACHE_BASE+'_'+groupId+'_'+hash(mapping.newUrl+'|'+period.year+'|'+period.semester);
+        let newKey=K_RATING_CACHE_BASE+'_'+groupId+'_'+hash(mapping.newUrl+'|'+ratingPeriodIdentityKey(period));
         writeJson(newKey,data);
       }
     });
@@ -575,7 +607,7 @@ function naturalGroupSort(a,b){let ay=(/^\d{2}/.exec(a.name)||['00'])[0],by=(/^\
 function groupLabel(){return selectedGroup.name||DEFAULT_GROUP.name;}
 function ratingGroupLabel(){return ratingGroup.name||groupLabel();}
 function scheduleNotificationScope(group){let g=group||selectedGroup;return String(g&&g.id||'');}
-function ratingNotificationScope(book){let p=ratingPeriod||{};return String(ratingGroup&&ratingGroup.id||'')+'|'+String(book&&book.url||'')+'|'+String(p.year||'')+'|'+String(p.semester||'');}
+function ratingNotificationScope(book){let p=ratingPeriod||{};return String(ratingGroup&&ratingGroup.id||'')+'|'+String(book&&book.url||'')+'|'+ratingPeriodIdentityKey(p);}
 function hash(s){let h=0;for(let i=0;i<s.length;i++)h=((h<<5)-h+s.charCodeAt(i))|0;return Math.abs(h);}
 function cardColor(subject){return colors[subject]||pastel[hash(subject)%pastel.length];}
 function textColor(hex){let h=(hex||'').replace('#','');if(h.length!==6)return '#1f2937';let r=parseInt(h.slice(0,2),16),g=parseInt(h.slice(2,4),16),b=parseInt(h.slice(4,6),16);return (0.299*r+0.587*g+0.114*b)>155?'#172033':'#ffffff';}
@@ -714,9 +746,15 @@ async function refreshRatingAvailablePeriods(force,pickerKind){
   }catch(e){return false;}finally{ratingPeriodRefreshState.busy=false;}
 }
 function normalizeRatingPeriod(p){p=p&&typeof p==='object'?p:{};return {year:String(p.year||''),yearLabel:String(p.yearLabel||p.year||''),semester:String(p.semester||''),semesterLabel:String(p.semesterLabel||p.semester||'')};}
+function ratingPeriodIdentityKey(period){
+  let p=normalizeRatingPeriod(period||{}),yk='',sk='';
+  if(p.yearLabel&&ratingLooksLikeYearLabel(p.yearLabel))yk=ratingCanonicalYearKey(p.yearLabel);else yk='value:'+String(p.year||'');
+  if(p.semesterLabel&&(ratingLooksLikeSemesterLabel(p.semesterLabel)||ratingLooksLikeSemesterShort(p.semesterLabel)))sk=ratingCanonicalSemesterKey(p.semesterLabel);else sk='value:'+String(p.semester||'');
+  return yk+'|'+sk;
+}
 function loadStoredRatingPeriod(book){return sanitizeRatingPeriod(normalizeRatingPeriod(readJson(ratingPeriodKey(book),{})));}
 function saveRatingPeriod(){if(selectedBook){ratingPeriod=sanitizeRatingPeriod(ratingPeriod);writeJson(ratingPeriodKey(selectedBook),ratingPeriod);}}
-function ratingCacheKey(book,period){let p=normalizeRatingPeriod(period||ratingPeriod);return K_RATING_CACHE_BASE+'_'+ratingGroup.id+'_'+hash(String(book&&book.url||'none')+'|'+p.year+'|'+p.semester);}
+function ratingCacheKey(book,period){let p=normalizeRatingPeriod(period||ratingPeriod);return K_RATING_CACHE_BASE+'_'+ratingGroup.id+'_'+hash(String(book&&book.url||'none')+'|'+ratingPeriodIdentityKey(p));}
 function ratingDetailCacheKey(url){return K_RATING_DETAIL_CACHE_BASE+'_'+hash(String(url||''));}
 function ratingReadDetailCache(url){let v=readJson(ratingDetailCacheKey(url),null);return v&&Array.isArray(v.points)?v:null;}
 function ratingReadDetailPoints(url){let v=ratingReadDetailCache(url);return ratingDetailCacheUsable(v)?v.points:null;}
@@ -913,6 +951,36 @@ function ratingCanonicalYearKey(label){
 }
 function ratingCanonicalSemesterKey(label){
   let t=cleanLine(label||'').toLowerCase().replace(/ё/g,'е');if(/осенн/.test(t))return 'autumn';if(/весенн/.test(t))return 'spring';let m=t.match(/(?:^|\s)([1-9]|i{1,3}|iv)(?:\s|$)/i);return m?String(m[1]).toLowerCase():t;
+}
+function ratingYearOptionKey(o){
+  if(!o)return '';
+  let label=cleanLine(o.label||'');
+  if(label&&ratingLooksLikeYearLabel(label))return 'year:'+ratingCanonicalYearKey(label);
+  return 'year-value:'+String(o.value||'');
+}
+function ratingSemesterOptionKey(o,yearLabel){
+  if(!o)return '';
+  let y=cleanLine(o.yearLabel||yearLabel||ratingPeriod&&ratingPeriod.yearLabel||'');
+  return 'semester:'+(y?ratingCanonicalYearKey(y):'*')+'|'+ratingCanonicalSemesterKey(o.label||o.value||'');
+}
+function ratingPeriodOptionKey(kind,o,yearLabel){return kind==='year'?ratingYearOptionKey(o):ratingSemesterOptionKey(o,yearLabel);}
+function ratingCurrentPeriodOptionKey(kind){
+  if(kind==='year')return ratingPeriod.yearLabel?'year:'+ratingCanonicalYearKey(ratingPeriod.yearLabel):'';
+  return ratingPeriod.semesterLabel?'semester:'+(ratingPeriod.yearLabel?ratingCanonicalYearKey(ratingPeriod.yearLabel):'*')+'|'+ratingCanonicalSemesterKey(ratingPeriod.semesterLabel):'';
+}
+function ratingFindPeriodOption(kind,options,identity){
+  options=options||[];identity=String(identity||'');
+  let byKey=options.find(function(o){return ratingPeriodOptionKey(kind,o,ratingPeriod.yearLabel||ratingPeriod.year)===identity;});
+  if(byKey)return byKey;
+  // Backward compatibility for pre-v0.45 callers: only accept a raw portal
+  // value when it identifies exactly one option. Duplicate values are never
+  // allowed to decide which academic year the user chose.
+  let same=options.filter(function(o){return String(o&&o.value||'')===identity;});
+  if(same.length===1)return same[0];
+  if(kind==='year'&&ratingLooksLikeYearLabel(identity)){
+    let key=ratingCanonicalYearKey(identity);return options.find(function(o){return ratingCanonicalYearKey(o.label||'')===key;})||null;
+  }
+  return null;
 }
 function ratingVerifiedCurrentPeriodIds(doc,sourceUrl,years,semesters){
   let yearCounts=new Map(),semCounts=new Map();
@@ -1273,7 +1341,7 @@ function ratingSelectedFromLiveDoc(doc,kind){
   let state=ratingPeriodStateFromDoc(doc,(doc.location&&doc.location.href)||location.href),arr=kind==='year'?state.years:state.semesters;return arr.find(o=>o.selected)||arr[0]||null;
 }
 function ratingBindNativePeriodItems(kind){
-  document.querySelectorAll('.ratingPeriodItem').forEach(function(btn){btn.onclick=function(){let value=this.dataset.ratingPeriodValue||'';closeModal();selectRatingPeriod(kind,value);};});
+  document.querySelectorAll('.ratingPeriodItem').forEach(function(btn){btn.onclick=function(){let key=this.dataset.ratingPeriodKey||'';closeModal();selectRatingPeriod(kind,key);};});
 }
 function ratingNativePickerEmptyHtml(kind,message){
   let what=kind==='year'?'учебного года':'семестра';
@@ -1566,9 +1634,9 @@ function ratingPickerOptions(kind){
   return ratingSemesterOptionsForYear(ratingPeriodOptions.semesters||[],ratingPeriod.yearLabel||ratingPeriod.year);
 }
 function ratingPeriodPickerHtml(kind,options){
-  let current=kind==='year'?ratingPeriod.year:ratingPeriod.semester;
+  let currentKey=ratingCurrentPeriodOptionKey(kind);
   if(!options||!options.length)return '<div class="emptySmall">Варианты пока не получены с портала.</div>';
-  return '<div class="ratingPeriodPicker">'+options.map(function(o){let active=String(o.value)===String(current);return '<button type="button" class="ratingPeriodItem'+(active?' current':'')+'" data-rating-period-value="'+esc(o.value)+'"><span>'+esc(o.label||o.value)+'</span><span class="groupMark">'+(active?'✓':'›')+'</span></button>';}).join('')+'</div>';
+  return '<div class="ratingPeriodPicker">'+options.map(function(o){let key=ratingPeriodOptionKey(kind,o,ratingPeriod.yearLabel||ratingPeriod.year),active=!!currentKey&&key===currentKey;return '<button type="button" class="ratingPeriodItem'+(active?' current':'')+'" data-rating-period-key="'+esc(key)+'"><span>'+esc(o.label||o.value)+'</span><span class="groupMark">'+(active?'✓':'›')+'</span></button>';}).join('')+'</div>';
 }
 async function openRatingPeriodPicker(kind){
   let title=kind==='year'?'Учебный год':'Семестр';
@@ -1583,10 +1651,16 @@ async function openRatingPeriodPicker(kind){
   if(options&&options.length){ratingBindNativePeriodItems(kind);refreshRatingAvailablePeriods(true,kind);return;}
   refreshNativeRatingPeriodPicker(kind);
 }
-function selectRatingPeriod(kind,value){
-  if(!selectedBook)return;let options=ratingPickerOptions(kind),found=(options||[]).find(o=>String(o.value)===String(value));
-  if(kind==='year'){ratingPeriod.year=String(value||'');ratingPeriod.yearLabel=found?ratingCanonicalYearLabel(found.label):ratingCanonicalYearLabel(String(value||''));ratingPeriod.semester='';ratingPeriod.semesterLabel='';}
-  else{ratingPeriod.semester=String(value||'');ratingPeriod.semesterLabel=found?found.label:String(value||'');}
+function selectRatingPeriod(kind,identity){
+  if(!selectedBook)return;let options=ratingPickerOptions(kind),found=ratingFindPeriodOption(kind,options,identity);
+  if(!found){setStatus(kind==='year'?'Не удалось выбрать учебный год':'Не удалось выбрать семестр');return;}
+  if(kind==='year'){
+    // The visible year label is the UI identity. Portal ids are transport
+    // details and may temporarily collide for different years.
+    ratingPeriod.year=String(found.value||'');ratingPeriod.yearLabel=ratingCanonicalYearLabel(found.label||'');ratingPeriod.semester='';ratingPeriod.semesterLabel='';
+  }else{
+    ratingPeriod.semester=String(found.value||'');ratingPeriod.semesterLabel=found.label||String(found.value||'');
+  }
   saveRatingPeriod();ratingLastBackgroundAt=0;ratingLoadSeq++;updateRatingPeriodControls();
   if(kind==='year'){ratingData=null;renderRating();setStatus('Выберите семестр');return;}
   let cached=readJson(ratingCacheKey(selectedBook,ratingPeriod),null);if(cached){ratingData=ratingRepairControlPointDuplicatesInData(cached);ratingPeriodOptions=sanitizeRatingPeriodOptions(cached.periodOptions||ratingPeriodOptions);ratingPeriodCatalog=Array.isArray(cached.periodCatalog)?cached.periodCatalog:[];renderRating();setStatus('Показан сохранённый рейтинг · проверяем изменения...');}else{ratingData=null;renderRating();}
@@ -1872,7 +1946,7 @@ function ratingFetchDetailControlPoints(url,item){
 }
 
 function ratingContextMatches(ctx){
-  if(!ctx)return false;let p=normalizeRatingPeriod(ratingPeriod);return String(ratingGroup&&ratingGroup.id||'')===String(ctx.groupId||'')&&String(selectedBook&&selectedBook.url||'')===String(ctx.bookUrl||'')&&String(p.year||'')===String(ctx.period&&ctx.period.year||'')&&String(p.semester||'')===String(ctx.period&&ctx.period.semester||'');
+  if(!ctx)return false;let p=normalizeRatingPeriod(ratingPeriod);return String(ratingGroup&&ratingGroup.id||'')===String(ctx.groupId||'')&&String(selectedBook&&selectedBook.url||'')===String(ctx.bookUrl||'')&&ratingPeriodIdentityKey(p)===ratingPeriodIdentityKey(ctx.period||{});
 }
 function ratingSubjectItem(data,subject){return ratingSubjectsResolved(data).find(function(x){return normalizeSubject(x.subject)===normalizeSubject(subject);})||null;}
 function ratingControlPointsFromItem(item){let map=new Map();(item&&item.details||[]).forEach(function(d){let m=cleanLine(d&&d.label||'').match(/^контрольная\s+точка\s+([1-5])$/i);if(m)map.set(Number(m[1]),{label:'Контрольная точка '+m[1],value:cleanLine(d&&d.value||'')||'—'});});let out=[];for(let n=1;n<=5;n++)if(map.has(n))out.push(map.get(n));return out.length===5?out:null;}
@@ -2002,7 +2076,7 @@ async function loadRating(forceDetails){
   ratingBusy=true;setBusy(true);setStatus(baseline?'Проверяем изменения рейтинга...':'Загружаем рейтинг...');if(!ratingData)renderRating();
   try{
     let data=await fetchRatingData(selectedBook);if(run!==ratingLoadSeq)return;if(requestGroup!==String(ratingGroup.id||'')||requestBookUrl!==String(selectedBook&&selectedBook.url||''))return;
-    let current=normalizeRatingPeriod(ratingPeriod);if(String(current.year||'')!==String(requestPeriod.year||'')||String(current.semester||'')!==String(requestPeriod.semester||''))return;
+    let current=normalizeRatingPeriod(ratingPeriod);if(ratingPeriodIdentityKey(current)!==ratingPeriodIdentityKey(requestPeriod))return;
     ratingLastBackgroundAt=Date.now();try{localStorage.setItem(K_RATING_BG_LAST,String(ratingLastBackgroundAt));}catch(e){}
     ratingPeriod=sanitizeRatingPeriod(data.period);ratingPeriodOptions=sanitizeRatingPeriodOptions(data.periodOptions||{years:[],semesters:[]});ratingStoreAvailablePeriods(ratingPeriodOptions);ratingPeriodCatalog=Array.isArray(data.periodCatalog)?data.periodCatalog:[];saveRatingPeriod();
     let finalKey=ratingCacheKey(selectedBook,ratingPeriod),oldData=readJson(finalKey,null)||baseline;if(oldData)ratingRepairControlPointDuplicatesInData(oldData);ratingSeedDetailPointsFromCache(data,oldData);ratingRepairControlPointDuplicatesInData(data);
@@ -2019,7 +2093,7 @@ async function loadRating(forceDetails){
 }
 
 function ratingHydrateStoredState(){
-  let storedBook=readJson(ratingBookKey(),null),storedPeriod=storedBook?loadStoredRatingPeriod(storedBook):normalizeRatingPeriod({}),sameBook=!!(selectedBook&&storedBook&&String(selectedBook.url||'')===String(storedBook.url||'')),samePeriod=sameBook&&String(ratingPeriod.year||'')===String(storedPeriod.year||'')&&String(ratingPeriod.semester||'')===String(storedPeriod.semester||'');
+  let storedBook=readJson(ratingBookKey(),null),storedPeriod=storedBook?loadStoredRatingPeriod(storedBook):normalizeRatingPeriod({}),sameBook=!!(selectedBook&&storedBook&&String(selectedBook.url||'')===String(storedBook.url||'')),samePeriod=sameBook&&ratingPeriodIdentityKey(ratingPeriod)===ratingPeriodIdentityKey(storedPeriod);
   let cachedBooks=readJson(ratingBooksKey(),null);ratingBooks=cachedBooks&&cachedBooks.books?cachedBooks.books:[];
   selectedBook=storedBook;ratingPeriod=storedPeriod;
   if(!selectedBook){ratingData=null;ratingPeriodOptions=ratingStoredAvailablePeriods();ratingPeriodCatalog=[];updateBookButton();updateRatingPeriodControls();renderRating();return false;}
@@ -2036,7 +2110,7 @@ async function checkRatingInBackground(force){
   let requestGroup=String(ratingGroup.id||''),requestBookUrl=String(selectedBook.url||''),requestPeriod=normalizeRatingPeriod(ratingPeriod),requestKey=ratingCacheKey(selectedBook,requestPeriod),oldData=readJson(requestKey,null);if(oldData)ratingRepairControlPointDuplicatesInData(oldData);
   ratingBackgroundBusy=true;ratingLastBackgroundAt=now;try{localStorage.setItem(K_RATING_BG_LAST,String(now));}catch(e){}
   try{
-    let data=await fetchRatingData(selectedBook);if(requestGroup!==String(ratingGroup.id||'')||requestBookUrl!==String(selectedBook&&selectedBook.url||''))return;let current=normalizeRatingPeriod(ratingPeriod);if(String(current.year||'')!==String(requestPeriod.year||'')||String(current.semester||'')!==String(requestPeriod.semester||''))return;
+    let data=await fetchRatingData(selectedBook);if(requestGroup!==String(ratingGroup.id||'')||requestBookUrl!==String(selectedBook&&selectedBook.url||''))return;let current=normalizeRatingPeriod(ratingPeriod);if(ratingPeriodIdentityKey(current)!==ratingPeriodIdentityKey(requestPeriod))return;
     let actualPeriod=sanitizeRatingPeriod(data.period||requestPeriod),finalKey=ratingCacheKey(selectedBook,actualPeriod),baseline=readJson(finalKey,null)||oldData;if(baseline)ratingRepairControlPointDuplicatesInData(baseline);ratingSeedDetailPointsFromCache(data,baseline);ratingRepairControlPointDuplicatesInData(data);
     let notifyScope=ratingNotificationScope(selectedBook),scopeChanged=localStorage.getItem(K_NOTIFY_RATING_SCOPE)!==notifyScope;localStorage.setItem(K_NOTIFY_RATING_SCOPE,notifyScope);let detailSubjects=ratingDetailSubjectsToRefresh(data,baseline,!!force);data.detailsPending=detailSubjects.length>0;if(!detailSubjects.length||!baseline)writeJson(finalKey,data);
     if(section==='rating'&&ratingContextMatches({groupId:requestGroup,bookUrl:requestBookUrl,period:actualPeriod})){ratingData=data;ratingPeriod=actualPeriod;ratingPeriodOptions=sanitizeRatingPeriodOptions(data.periodOptions||ratingPeriodOptions);ratingStoreAvailablePeriods(ratingPeriodOptions);ratingPeriodCatalog=Array.isArray(data.periodCatalog)?data.periodCatalog:[];saveRatingPeriod();renderRating();}
@@ -2371,6 +2445,7 @@ ratingRepairBrokenDetailCachesV039();
 ratingRepairBrokenDetailCachesV040();
 ratingRepairAllCachedControlPointsV048();
 cleanupRemovedSdoV044();
+repairRatingPeriodIdentityV045();
 nativeNotificationAction('ready');
 let cache=readGroupJson(K_CACHE_BASE,null);if(cache&&cache.events&&cache.events.length){allEvents=cache.events;lastRange={start:cache.start,end:cache.end};render();setStatus('Показана сохранённая версия, проверяем обновления...');setTimeout(dismissSplash,1050);}else if(selectedGroup.id===DEFAULT_GROUP.id&&initialEvents.length){allEvents=initialEvents;render();setTimeout(dismissSplash,1050);}
 updateBanner();

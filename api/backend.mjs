@@ -2,7 +2,7 @@ import {URL} from "node:url";
 
 export const maxDuration = 60;
 
-const APP_VERSION="0.44";
+const APP_VERSION="0.45";
 const LEGACY_SDO_COOKIE="mguu_sdo_session";
 const ALLOWED_PORTAL=new Set(["/student/scheduler1.php","/student/rating.php","/student/personalrating.php","/student/detailed.php"]);
 
